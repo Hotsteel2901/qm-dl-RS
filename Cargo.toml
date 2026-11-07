@@ -2,7 +2,9 @@
 name = "qqmusic-dl"
 version = "0.1.0"
 edition = "2021"
-description = "QQ音乐 MP3/FLAC 下载器（登录态 API，支持会员音质）"
+description = "QQ音乐下载器：匿名镜像 / 票据桥 / 扫码登录"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Hotsteel2901/qm-dl-RS"
 
 [dependencies]
 anyhow = "1.0"

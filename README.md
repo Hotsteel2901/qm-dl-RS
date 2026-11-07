@@ -146,3 +146,14 @@ CDN 直连无 vkey 一律 403，试听 vkey 换路径也 403。
 | src/download.rs | 断点续传、进度条、文件头校验 |
 | tools/decrypt_ag1.js | 解密网页版 musics.fcg 的 ag-1 请求体 |
 | tools/firefox_cookie.py | 从本机 Firefox profile 直接导出 QQ 音乐 Cookie |
+| LICENSE | AGPL-3.0-or-later 全文 |
+
+---
+
+## 许可证
+
+**AGPL-3.0-or-later** —— 全文见 [LICENSE](LICENSE)，SPDX 标识 `AGPL-3.0-or-later`
+（GNU Affero GPL v3，或你选择的任何更新版本）。
+
+按 AGPL 第 13 条：如果你修改本程序并作为网络服务提供给他人使用，
+需要向这些使用者提供对应的完整源码。
