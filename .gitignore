@@ -1,0 +1,7 @@
+/target
+*.part
+cookie.txt
+# 本地下载的音频
+*.mp3
+*.flac
+*.m4a
