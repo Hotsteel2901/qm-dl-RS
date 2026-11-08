@@ -54,10 +54,15 @@ pub fn resolve(client: &Client, song: &Song, policy: &str) -> Result<Resolved> {
     bail!("匿名镜像未命中 —— {}", errors.join("；"))
 }
 
+/// 同一个镜像源最多尝试几个候选。第一个候选经常是会员专享/已下架，
+/// 后面的同名普通版本反而能匿名播放，所以不能只试“最高分”那一个。
+const MAX_CANDIDATE_TRIES: usize = 5;
+
 fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resolved>> {
     let queries = search_queries(song);
-    let mut best: Option<Candidate> = None;
-    let mut best_score = i32::MIN;
+    let debug = std::env::var_os("QQMUSIC_DEBUG").is_some();
+    let mut scored: Vec<(i32, Candidate)> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     for q in &queries {
         let cands = match name {
@@ -66,7 +71,6 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
             "netease" => search_netease(client, q)?,
             _ => bail!("未知镜像源"),
         };
-        let debug = std::env::var_os("QQMUSIC_DEBUG").is_some();
         for c in cands {
             let sc = score(song, &c);
             if debug {
@@ -76,38 +80,73 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
                 );
             }
             if let Some(s) = sc {
-                if s > best_score {
-                    best_score = s;
-                    best = Some(c);
-                }
+                scored.push((s, c));
             }
         }
-        if best.is_some() {
+        if !scored.is_empty() {
             break;
         }
     }
 
-    let cand = match best {
-        Some(c) => c,
-        None => return Ok(None),
-    };
-    println!(
-        "  镜像命中: {} - {}（{}）",
-        cand.artist, cand.title, cand.provider
-    );
-    let r = match cand.provider {
-        "migu" => resolve_migu(client, &cand)?,
-        "kuwo" => resolve_kuwo(client, &cand)?,
-        "netease" => resolve_netease(client, &cand)?,
-        _ => unreachable!(),
-    };
-    Ok(Some(r))
+    if scored.is_empty() {
+        return Ok(None);
+    }
+
+    // 分数高的优先；同分时保持搜索结果原有顺序。
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut attempts = 0usize;
+    for (sc, cand) in scored {
+        if !seen_ids.insert(cand.id.clone()) {
+            continue;
+        }
+        if attempts >= MAX_CANDIDATE_TRIES {
+            if debug {
+                eprintln!("    已尝试 {MAX_CANDIDATE_TRIES} 个候选，放弃剩余");
+            }
+            break;
+        }
+        attempts += 1;
+        if attempts == 1 {
+            println!(
+                "  镜像命中: {} - {}（{}，score {}）",
+                cand.artist, cand.title, cand.provider, sc
+            );
+        } else {
+            println!(
+                "  改试候选: {} - {}（{}，score {}）",
+                cand.artist, cand.title, cand.provider, sc
+            );
+        }
+        let result = match cand.provider {
+            "migu" => resolve_migu(client, &cand),
+            "kuwo" => resolve_kuwo(client, &cand),
+            "netease" => resolve_netease(client, &cand),
+            _ => unreachable!(),
+        };
+        match result {
+            Ok(r) => return Ok(Some(r)),
+            Err(e) => {
+                if debug {
+                    eprintln!("    该候选不可用: {e:#}");
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
 }
 
 /// 会改变作品本体的版本标记：命中且原曲没有 → 直接淘汰。
-const VERSION_MARKERS: [&str; 18] = [
+const VERSION_MARKERS: [&str; 20] = [
     "live", "伴奏", "ktv", "dj", "remix", "翻唱", "cover", "纯音乐", "铃声", "女声版",
-    "童声", "片段", "慢摇", "广场舞", "钢琴版", "吉他版", "八音盒", "纯享",
+    "童声", "片段", "慢摇", "广场舞", "钢琴版", "吉他版", "八音盒", "纯享", "现场",
+    "演唱会",
 ];
 
 fn search_queries(song: &Song) -> Vec<String> {
@@ -372,6 +411,10 @@ fn score(song: &Song, c: &Candidate) -> Option<i32> {
     }
 
     let cand_artist = normalize(&c.artist);
+    if cand_artist.is_empty() {
+        // 空歌手名会让 contains("") 恒真，绝不能当成匹配成功。
+        return None;
+    }
     let artists: Vec<String> = song
         .artists
         .iter()
@@ -402,12 +445,14 @@ fn score(song: &Song, c: &Candidate) -> Option<i32> {
         s += 80 - diff.abs() as i32 * 10;
     }
 
-    let song_norm = normalize(&song.name);
-    let cand_norm = normalize(&c.title);
+    let song_lower = song.name.to_lowercase();
+    let cand_lower = c.title.to_lowercase();
     for bad in VERSION_MARKERS {
-        let in_song = song_norm.contains(bad);
-        let in_cand = cand_norm.contains(bad);
-        // 原曲不是伴奏/翻唱/Live 时，命中标记的候选直接淘汰，绝不拿替代品冒充
+        let in_song = has_marker(&song_lower, bad);
+        let in_cand = has_marker(&cand_lower, bad);
+        // 原曲不是伴奏/翻唱/Live 时，命中标记的候选直接淘汰，绝不拿替代品冒充。
+        // 注意不能用裸子串匹配：那样 "Alive" 会被当成 "live"，
+        // 结果是 Live 版反而能通过、正版原曲被误杀。
         if in_cand && !in_song {
             return None;
         }
@@ -417,6 +462,18 @@ fn score(song: &Song, c: &Candidate) -> Option<i32> {
     }
 
     Some(s)
+}
+
+/// 版本标记匹配。ASCII 标记（live / dj / remix / cover / ktv）按单词边界匹配，
+/// 避免 "Alive" 命中 "live"；中文标记仍按子串匹配。
+fn has_marker(title_lower: &str, marker: &str) -> bool {
+    if marker.is_ascii() {
+        title_lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == marker)
+    } else {
+        title_lower.contains(marker)
+    }
 }
 
 pub fn core_title(s: &str) -> String {
@@ -445,11 +502,17 @@ pub fn normalize(s: &str) -> String {
 }
 
 fn clean(s: &str) -> String {
-    s.replace("&nbsp;", " ")
-        .replace("\\u0026", "&")
+    let mut out = s.replace("&nbsp;", " ").replace("&amp;", "&");
+    // 酷我返回的是单引号伪 JSON，值里的 & 可能带一层或多层反斜杠转义，
+    // 例如 4 个反斜杠 + u0026。先折叠重复反斜杠，再还原实体。
+    while out.contains("\\\\") {
+        out = out.replace("\\\\", "\\");
+    }
+    out.replace("\\u0026", "&")
         .replace("\\u003c", "<")
         .replace("\\u003e", ">")
         .replace("\\u0027", "'")
+        .replace("\\&", "&")
         .trim()
         .to_string()
 }
@@ -473,4 +536,77 @@ fn get_json(req: reqwest::blocking::RequestBuilder) -> Result<Value> {
         bail!("镜像返回 HTTP {status}");
     }
     serde_json::from_str(&text).context("解析镜像响应失败")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn song(name: &str, artist: &str, duration: u64) -> Song {
+        Song {
+            mid: "m".into(),
+            media_mid: "mm".into(),
+            name: name.into(),
+            artists: vec![artist.into()],
+            album: String::new(),
+            duration,
+            size_128: 0,
+            size_320: 0,
+            size_flac: 0,
+            preview_size: 0,
+        }
+    }
+
+    fn cand(title: &str, artist: &str, duration: Option<u64>) -> Candidate {
+        Candidate {
+            provider: "migu",
+            id: "id".into(),
+            copyright_id: "c".into(),
+            title: title.into(),
+            artist: artist.into(),
+            duration,
+        }
+    }
+
+    #[test]
+    fn alive_is_not_treated_as_live() {
+        let s = song("Alive", "Pearl Jam", 294);
+        assert!(score(&s, &cand("Alive", "Pearl Jam", Some(294))).is_some());
+        assert!(score(&s, &cand("Alive (Live)", "Pearl Jam", Some(294))).is_none());
+        assert!(score(&s, &cand("Alive(Live)", "Pearl Jam", None)).is_none());
+    }
+
+    #[test]
+    fn ascii_markers_match_whole_tokens() {
+        assert!(has_marker("晴天 (live)", "live"));
+        assert!(has_marker("晴天live", "live"));
+        assert!(!has_marker("alive", "live"));
+        assert!(has_marker("song (dj版)", "dj"));
+        assert!(has_marker("song（ktv版）", "ktv"));
+    }
+
+    #[test]
+    fn original_with_marker_allows_same_marker() {
+        let s = song("晴天 (Live)", "周杰伦", 269);
+        assert!(score(&s, &cand("晴天 (Live)", "周杰伦", Some(269))).is_some());
+    }
+
+    #[test]
+    fn version_marker_candidate_is_rejected() {
+        let s = song("晴天", "周杰伦", 269);
+        assert!(score(&s, &cand("晴天 (KTV版伴奏)", "周杰伦", Some(269))).is_none());
+        assert!(score(&s, &cand("晴天 (现场版)", "周杰伦", Some(269))).is_none());
+    }
+
+    #[test]
+    fn empty_candidate_artist_never_matches() {
+        let s = song("晴天", "周杰伦", 269);
+        assert!(score(&s, &cand("晴天", "", Some(269))).is_none());
+    }
+
+    #[test]
+    fn kuwo_double_escaped_ampersand() {
+        // serde 解析后剩下两个反斜杠 + u0026
+        assert_eq!(clean("李宗盛\\\\u0026陈淑桦"), "李宗盛&陈淑桦");
+    }
 }

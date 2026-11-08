@@ -205,6 +205,46 @@ https://y.qq.com/portal/wx_redirect.html 的内联 JS 就是官方换票逻辑�
 票据既可能通过 Set-Cookie（qm_keyst / qqmusic_key / uin / wxuin）下发，
 也可能只出现在 JSON 的 musickey / musicid 里，两条都兜住。
 
+### QQ音乐 App（手机客户端扫码）
+
+    POST musicu.fcg   music.login.LoginServer / CreateQRCode     Content-Type: application/json
+         comm  (Android) ct=11 cv=13020508 v=13020508 tmeAppID=qqmusic
+               format=json inCharset/outCharset=utf-8 uid=3931641530
+               QIMEI36=<设备指纹，失败时可用固定回退值>
+         param {"tmeAppID":"qqmusic","ct":11,"cv":13020508}
+         body  {"music.login.LoginServer.CreateQRCode":
+                  {"module":"music.login.LoginServer","method":"CreateQRCode","param":{...}}}
+         → data.qrcode = data:image/png;base64,... , data.qrcodeID , data.expiresIn
+
+    MQTT 5.0 over WebSocket：wss://mu.y.qq.com:443/ws/handshake
+         CONNECT
+           AuthenticationMethod = "pass"
+           UserProperty: tmeAppID=qqmusic, business=management,
+                         hashTag=<qrcodeID>, clientTag=management.user,
+                         userID=<qrcodeID>
+         SUBSCRIBE management.qrcode_login/<qrcodeID>
+           UserProperty: authorization=tmelogin, pubsub=unicast
+         PUBLISH（状态在 UserProperty 的 type 字段）：
+           scanned / canceled / timeout / loginFailed / cookies
+         cookies 事件：
+           {"cookies":{"qqmusic_uin":{"value":"..."},"qqmusic_key":{"value":"..."}}}
+
+    POST musicu.fcg   music.login.LoginServer / Login            Content-Type: application/json
+         comm  与 CreateQRCode 相同的 Android 公参 + tmeLoginType="6"
+         body  {"music.login.LoginServer.Login":
+                  {"module":"music.login.LoginServer","method":"Login",
+                   "param":{"musicid":<qqmusic_uin>,"qrCodeID":"...",
+                            "token":"<qqmusic_key>"}}}
+         → data.musickey / data.musicid（同样以 JSON 为准，不依赖 Set-Cookie）
+
+    ⚠ 换票必须用 Android 公参（ct=11 / cv=13020508）和 application/json；
+      用 Web 端 comm（platform=yqq、cv=0）+ 表单 Content-Type 会被判为
+      登录态失效，返回 code=1000。回包 key 是 `music.login.LoginServer.Login`。
+
+连接阶段服务端可能回 `ServerMoved`（0x9D）并带 `ServerReference`；客户端需要重连到
+`/ws/handshake/<ServerReference>`。本项目用 rumqttc 做 MQTT 层，遇到该状态会自动重试，
+通常 1～2 次后即落到可服务的节点。
+
 ### 四个坑（都是真踩出来的）
 
 1. **ptqrtoken 的 hash33 种子是 0**，不是 g_tk 那个 5381。

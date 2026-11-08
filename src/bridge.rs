@@ -6,16 +6,39 @@ use std::net::{TcpListener, TcpStream};
 use crate::api::{QqClient, Quality, StreamLookup, StreamUrl};
 use crate::auth::Auth;
 
-/// 启动一个本机"票据桥"：用会员账号把 songmid 换成 vkey 直链。
+/// 启动一个"票据桥"：用会员账号把 songmid 换成 vkey 直链。
 /// 直链本身是 bearer token（不校验 Cookie / IP），任何没有账号的机器都能直接下载。
-pub fn serve(port: u16, auth: Auth, proxy: Option<&str>, insecure: bool) -> Result<()> {
+pub fn serve(
+    port: u16,
+    bind: &str,
+    auth: Auth,
+    proxy: Option<&str>,
+    insecure: bool,
+) -> Result<()> {
     if !auth.logged_in {
         bail!("票据桥需要登录 Cookie（扫码/粘贴你本人的 Cookie 后再启动）");
     }
     let client = QqClient::new(auth, proxy, insecure)?;
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .with_context(|| format!("监听 127.0.0.1:{port} 失败"))?;
-    println!("票据桥已启动: http://127.0.0.1:{port}/url?mid=<songmid>&q=320");
+    let listener = TcpListener::bind((bind, port))
+        .with_context(|| format!("监听 {bind}:{port} 失败"))?;
+    let local = listener
+        .local_addr()
+        .context("读取票据桥监听地址失败")?;
+    if local.ip().is_unspecified() {
+        println!(
+            "票据桥已启动: http://<本机IP>:{}/url?mid=<songmid>&q=320",
+            local.port()
+        );
+        println!("监听: {local}");
+        println!(
+            "注意: 任何能访问该端口的人都能签发/使用直链，请只在可信网络使用；\
+             仅本机访问可加 --bind 127.0.0.1。"
+        );
+    } else {
+        println!(
+            "票据桥已启动: http://{local}/url?mid=<songmid>&q=320"
+        );
+    }
     println!("直链有效期约 2 小时；无账号的机器可用 --bridge 消费。");
     for conn in listener.incoming() {
         match conn {

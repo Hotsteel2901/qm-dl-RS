@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use crate::api::USER_AGENT;
 use crate::auth::{self, Auth};
 
+mod mobile;
+
 const QQ_APPID: &str = "716027609";
 const QQ_DAID: &str = "383";
 const QQ_PT_3RD_AID: &str = "100497308";
@@ -24,33 +26,48 @@ pub enum LoginKind {
     Qq,
     #[value(name = "wx", alias = "wechat")]
     Wx,
+    /// QQ音乐 App 扫码（也可直接用手机 QQ / 微信扫同一个码）
+    #[value(name = "qqmusic", alias = "app", alias = "mobile", alias = "client")]
+    QqMusic,
 }
 
 pub struct LoginOpts {
     pub open_browser: bool,
     pub timeout: Duration,
+    /// 与全局 --proxy 一致；登录链路走 curl，需要把代理显式传下去。
+    pub proxy: Option<String>,
+    /// 与全局 --insecure 一致（Reqable 等 MITM 代理的证书不被信任时使用）。
+    pub insecure: bool,
 }
 
 /// 扫码登录入口：拿到 Cookie 后写入默认配置并返回 Auth。
 pub fn login(kind: LoginKind, opts: &LoginOpts) -> Result<Auth> {
-    let http = CurlJar::new()?;
+    let http = CurlJar::new(opts.proxy.as_deref(), opts.insecure)?;
     let (auth, nick) = match kind {
         LoginKind::Qq => qq_login(&http, opts)?,
         LoginKind::Wx => wx_login(&http, opts)?,
+        LoginKind::QqMusic => mobile::login(&http, opts)?,
     };
 
     let path = write_cookie(&auth.cookie)?;
     println!();
     println!(
-        "登录成功{}",
-        if nick.is_empty() {
-            String::new()
-        } else {
-            format!("（{nick}）")
-        }
+        "  {}",
+        crate::ui::done(&format!(
+            "登录成功{}",
+            if nick.is_empty() {
+                String::new()
+            } else {
+                format!("（{nick}）")
+            }
+        ))
     );
-    println!("  账号 uin: {}", mask_uin(&auth.uin));
-    println!("  Cookie 已写入: {}", path.display());
+    println!("  {} {}", crate::ui::label("账号 uin"), crate::ui::id(&mask_uin(&auth.uin)));
+    println!("  {} {}", crate::ui::label("Cookie 已写入"), path.display());
+    println!(
+        "  {}",
+        crate::ui::dim("会员权益（320k / FLAC）是否可用取决于账号本身，可先用 `qqmusic-dl auth` 查看状态。")
+    );
     Ok(auth)
 }
 
@@ -71,7 +88,16 @@ fn qq_login(http: &CurlJar, opts: &LoginOpts) -> Result<(Auth, String)> {
             .get("qrsig")
             .cloned()
             .context("服务端没有下发 qrsig")?;
-        show_qr(&qr.body, "qq", opts, "手机 QQ")?;
+        show_qr(
+            &qr.body,
+            "qq",
+            opts,
+            "手机 QQ",
+            &[
+                "打开手机 QQ → 右上角 “+” → 扫一扫",
+                "扫描二维码，并在手机上点击“确认登录”",
+            ],
+        )?;
 
         let started = Instant::now();
         let tty = std::io::stdout().is_terminal();
@@ -243,7 +269,16 @@ fn wx_login(http: &CurlJar, opts: &LoginOpts) -> Result<(Auth, String)> {
         &format!("https://open.weixin.qq.com/connect/qrcode/{uuid}"),
         &[("Referer", "https://open.weixin.qq.com/")],
     )?;
-    show_qr(&qr.body, "wx", opts, "微信")?;
+    show_qr(
+        &qr.body,
+        "wx",
+        opts,
+        "微信",
+        &[
+            "打开微信 → 发现 → 扫一扫",
+            "扫描二维码，并在手机上点击“确认登录”",
+        ],
+    )?;
 
     let started = Instant::now();
     let tty = std::io::stdout().is_terminal();
@@ -382,6 +417,20 @@ fn musicu_post(http: &CurlJar, body: &str) -> Result<HttpOut> {
     )
 }
 
+/// 手机客户端链路使用标准 JSON 请求体（官方 Android 客户端就是 application/json）。
+fn musicu_post_json(http: &CurlJar, body: &str) -> Result<HttpOut> {
+    http.post_body(
+        MUSICU,
+        &[
+            ("Referer", "https://y.qq.com/"),
+            ("Origin", "https://y.qq.com"),
+            ("Accept", "*/*"),
+            ("Content-Type", "application/json"),
+        ],
+        body,
+    )
+}
+
 fn parse_login_response(resp: &HttpOut) -> Result<(Option<String>, Value)> {
     let value: Value = serde_json::from_slice(&resp.body).with_context(|| {
         format!(
@@ -448,18 +497,25 @@ fn build_auth(
         }
     }
 
+    // 登录接口把票据放在 JSON 的 data 里（musickey / musicid），实际响应
+    // 通常不带 Set-Cookie；少数情况下也会通过 Cookie 下发。两条通道都归一化，
+    // 后续所有请求才能按 Web 端的 qm_keyst + uin 形式使用。
+    let usable = |s: &str| !s.is_empty() && s != "0";
     let key = pairs
         .get("qm_keyst")
-        .or_else(|| pairs.get("qqmusic_key"))
-        .filter(|s| !s.is_empty())
+        .filter(|s| usable(s.as_str()))
+        .or_else(|| pairs.get("qqmusic_key").filter(|s| usable(s.as_str())))
+        .or_else(|| pairs.get("musickey").filter(|s| usable(s.as_str())))
         .cloned()
-        .context("登录成功但服务端没下发 qm_keyst/qqmusic_key")?;
+        .context("登录成功，但响应里没有 qm_keyst / qqmusic_key / musickey")?;
     let uin = pairs
         .get("wxuin")
-        .or_else(|| pairs.get("uin"))
-        .filter(|s| !s.is_empty())
+        .filter(|s| usable(s.as_str()))
+        .or_else(|| pairs.get("uin").filter(|s| usable(s.as_str())))
+        .or_else(|| pairs.get("str_musicid").filter(|s| usable(s.as_str())))
+        .or_else(|| pairs.get("musicid").filter(|s| usable(s.as_str())))
         .cloned()
-        .context("登录成功但没拿到 uin")?;
+        .context("登录成功，但响应里没有 uin / musicid")?;
 
     pairs.insert("qm_keyst".into(), key.clone());
     pairs.insert("qqmusic_key".into(), key);
@@ -495,10 +551,12 @@ fn write_cookie(cookie: &str) -> Result<PathBuf> {
 struct CurlJar {
     dir: PathBuf,
     jar: PathBuf,
+    proxy: Option<String>,
+    insecure: bool,
 }
 
 impl CurlJar {
-    fn new() -> Result<Self> {
+    fn new(proxy: Option<&str>, insecure: bool) -> Result<Self> {
         let dir = std::env::temp_dir().join(format!(
             "qqmusic-dl-login-{}-{}",
             std::process::id(),
@@ -511,7 +569,12 @@ impl CurlJar {
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
         let jar = dir.join("cookies.txt");
-        Ok(Self { dir, jar })
+        Ok(Self {
+            dir,
+            jar,
+            proxy: proxy.map(str::to_string),
+            insecure,
+        })
     }
 
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpOut> {
@@ -557,6 +620,12 @@ impl CurlJar {
             .arg(&hdr_path)
             .arg("-o")
             .arg(&body_path);
+        if let Some(p) = &self.proxy {
+            cmd.arg("-x").arg(p);
+        }
+        if self.insecure {
+            cmd.arg("-k");
+        }
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{k}: {v}"));
         }
@@ -635,7 +704,13 @@ fn parse_response_head(text: &str) -> (u16, Vec<(String, String)>) {
 
 // ==================== 二维码展示 ====================
 
-fn show_qr(bytes: &[u8], kind: &str, opts: &LoginOpts, channel: &str) -> Result<()> {
+fn show_qr(
+    bytes: &[u8],
+    kind: &str,
+    opts: &LoginOpts,
+    channel: &str,
+    steps: &[&str],
+) -> Result<()> {
     let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         "png"
     } else {
@@ -648,16 +723,23 @@ fn show_qr(bytes: &[u8], kind: &str, opts: &LoginOpts, channel: &str) -> Result<
     let _ = std::fs::write(&path, bytes);
 
     println!();
-    println!("  用 {channel} 扫码登录（二维码有时效，过期会提示）");
+    println!("  {} {}", crate::ui::bold("扫码登录"), crate::ui::id(channel));
     match render_qr(bytes) {
         Ok(art) => print!("{art}"),
         Err(e) => println!("  （终端渲染失败：{e}）"),
     }
-    println!("  二维码图片: {}", path.display());
+    println!("  {} {}", crate::ui::label("二维码图片"), path.display());
     if opts.open_browser {
         open_file(&path);
     }
-    println!("  等待扫码…");
+    if !steps.is_empty() {
+        println!();
+        println!("  {}", crate::ui::dim("操作步骤:"));
+        for (i, step) in steps.iter().enumerate() {
+            println!("    {}. {}", i + 1, step);
+        }
+    }
+    println!("  {}", crate::ui::dim("等待扫码…"));
     Ok(())
 }
 
@@ -878,4 +960,74 @@ fn mask_uin(uin: &str) -> String {
         chars[..3].iter().collect::<String>(),
         chars[chars.len() - 2..].iter().collect::<String>()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn json_login_credentials_become_cookies() {
+        // 实测登录响应只有 JSON：{"req":{"code":0,"data":{"musickey":...,"musicid":...}}}，
+        // 没有 Set-Cookie；必须能从 data 直接构造出 qm_keyst/uin。
+        let jar = BTreeMap::new();
+        let data = serde_json::json!({
+            "musickey": "W_XtestMusickey",
+            "musicid": 1152921505192837541u64,
+            "str_musicid": "1152921505192837541",
+            "nick": "tester",
+        });
+        let auth = build_auth(&jar, Some(&data), "测试").expect("应从 JSON 票据构造登录态");
+        assert!(auth.logged_in);
+        assert_eq!(auth.uin, "1152921505192837541");
+        assert_eq!(auth.g_tk, hash33("W_XtestMusickey"));
+        assert!(auth.cookie.contains("qm_keyst=W_XtestMusickey"));
+        assert!(auth.cookie.contains("qqmusic_key=W_XtestMusickey"));
+    }
+
+    #[test]
+    fn cookie_credentials_still_work() {
+        let mut jar = BTreeMap::new();
+        jar.insert("qm_keyst".to_string(), "cookieKey".to_string());
+        jar.insert("uin".to_string(), "o0123456789".to_string());
+        let auth = build_auth(&jar, None, "测试").expect("应从 Cookie 构造登录态");
+        assert!(auth.logged_in);
+        assert_eq!(auth.uin, "123456789");
+        assert_eq!(auth.g_tk, hash33("cookieKey"));
+    }
+
+    #[test]
+    fn parses_live_login_envelope() {
+        // 实测（无效 code 探针）返回的外层信封形状与字段名。
+        let out = HttpOut {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"code":0,"req":{"code":0,"data":{"musickey":"W_Xk","musicid":123456,"str_musicid":"123456","nick":"n"}}}"#
+                .to_vec(),
+        };
+        let (nick, data) = parse_login_response(&out).expect("应解析登录响应");
+        assert_eq!(nick.as_deref(), Some("n"));
+        let auth = build_auth(&BTreeMap::new(), Some(&data), "测试").expect("应构造登录态");
+        assert!(auth.logged_in);
+        assert_eq!(auth.uin, "123456");
+    }
+
+    #[test]
+    fn rejects_login_error_code() {
+        let out = HttpOut {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"code":0,"req":{"code":1000,"data":{}}}"#.to_vec(),
+        };
+        assert!(parse_login_response(&out).is_err());
+    }
+
+    #[test]
+    fn zero_uin_is_rejected() {
+        let mut jar = BTreeMap::new();
+        jar.insert("qm_keyst".to_string(), "k".to_string());
+        jar.insert("uin".to_string(), "0".to_string());
+        assert!(build_auth(&jar, None, "测试").is_err());
+    }
 }

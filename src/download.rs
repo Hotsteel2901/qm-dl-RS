@@ -49,6 +49,11 @@ pub fn download(
     } else if status.is_success() {
         existing = 0;
         (resp.content_length().unwrap_or(0), false)
+    } else if status.as_u16() == 416 && existing > 0 {
+        // .part 已经和远端一样长（或服务端对 Range 的处理有偏差）时，
+        // 服务端会回 416；删掉残留分片后从头再下一次（只重试这一次）。
+        let _ = fs::remove_file(&part);
+        return download(client, url, dest, quality, expected);
     } else {
         bail!("下载失败: HTTP {}", status);
     };

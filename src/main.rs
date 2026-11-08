@@ -5,6 +5,7 @@ mod download;
 mod login;
 mod mirror;
 mod probe;
+mod ui;
 
 use anyhow::{bail, Context, Result};
 use api::{QqClient, Quality, Song, StreamLookup, StreamUrl};
@@ -18,7 +19,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 #[command(
     name = "qqmusic-dl",
     version,
-    about = "QQ音乐下载器：账号直链 / 匿名镜像 / 会员票据桥"
+    about = "QQ音乐下载器：账号直链 / 匿名镜像 / 会员票据桥",
+    long_about = "QQ音乐下载器：账号直链 / 匿名镜像 / 会员票据桥。\n\n\
+                  取流顺序：QQ 原生 vkey 直链 → 匿名镜像（咪咕/酷我/网易，128k）→ 官方 60 秒试听。\n\
+                  需要 320k / FLAC 的 VIP 曲目时，请先 login，或使用会员票据桥。",
+    after_help = "常用示例：\n  \
+                  qqmusic-dl search \"晴天 周杰伦\" -n 5\n  \
+                  qqmusic-dl download 0039MnYb0qxYhV -q flac -o ~/Music\n  \
+                  qqmusic-dl --anon get \"晴天 周杰伦\" -n 1\n  \
+                  qqmusic-dl login qqmusic        # QQ音乐 App 扫码\n  \
+                  qqmusic-dl serve -p 8080        # 会员票据桥\n  \
+                  qqmusic-dl mint 000Jd2XU1i8Dpj -q 320 --json"
 )]
 struct Cli {
     /// 直接传入 Cookie 字符串（仅在你本人使用自己账号时提供）
@@ -55,7 +66,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
-    /// 搜索歌曲，只列出结果
+    /// 搜索歌曲，输出歌曲 ID、歌手、专辑、时长与可用音质
     Search {
         keyword: String,
         #[arg(short = 'n', long, default_value_t = 10)]
@@ -65,7 +76,10 @@ enum CliCommand {
         json: bool,
     },
 
-    /// 按 songmid 或 QQ音乐歌曲链接下载
+    /// 按歌曲 ID / QQ音乐链接下载（支持一次传多首）
+    ///
+    /// 自动按 320k → 128k → 匿名镜像 → 官方试听的顺序取流；单首失败不会中断其余歌曲。
+    /// 匿名下不到 VIP 曲目时，可先 `login qqmusic`，或使用 `--bridge` 消费会员票据。
     Download {
         #[arg(required = true)]
         songs: Vec<String>,
@@ -91,6 +105,8 @@ enum CliCommand {
     },
 
     /// 搜索关键词并下载前 N 首
+    ///
+    /// 会先列出搜索结果（含歌曲 ID），再逐首下载；某首失败不会影响其余歌曲。
     Get {
         keyword: String,
         #[arg(short = 'n', long, default_value_t = 1)]
@@ -112,6 +128,8 @@ enum CliCommand {
     },
 
     /// 用会员账号签发一条 vkey 直链（bearer token，2 小时内任何人可用）
+    ///
+    /// 直链本身不校验 Cookie / IP，可贴到任何下载器；请勿发到公开渠道。
     Mint {
         #[arg(required = true)]
         songs: Vec<String>,
@@ -121,15 +139,22 @@ enum CliCommand {
         json: bool,
     },
 
-    /// 启动本机票据桥：会员账号换直链，其它机器匿名消费
+    /// 启动会员票据桥：A 机持号签发，B 机零账号消费
+    ///
+    /// 默认监听 0.0.0.0:8080，供局域网其它机器访问；仅本机使用可加 `--bind 127.0.0.1`。
     Serve {
         #[arg(short = 'p', long, default_value_t = 8080)]
         port: u16,
+        /// 监听地址（默认 0.0.0.0，供局域网其它机器消费；仅本机可用 127.0.0.1）
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
     },
 
-    /// 扫码登录（qq / wx），Cookie 自动写入 ~/.config/qqmusic-dl/cookie.txt
+    /// 扫码登录（qq / wx / qqmusic），Cookie 自动写入 ~/.config/qqmusic-dl/cookie.txt
+    ///
+    /// qqmusic = QQ音乐 App 扫码（同一个码也支持手机 QQ / 微信）。
     Login {
-        /// 登录方式：qq | wx
+        /// 登录方式：qq | wx | qqmusic（QQ音乐 App）
         #[arg(default_value = "qq")]
         kind: login::LoginKind,
         /// 不自动用 xdg-open 打开二维码图片
@@ -151,8 +176,15 @@ struct Opts {
 }
 
 fn main() {
+    // 输出接到 `head` 等提前关闭的管道时，默认会因 EPIPE 触发 println! panic。
+    // 恢复系统默认的 SIGPIPE 行为，让进程安静退出（shell 看到 141）。
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     if let Err(e) = run() {
-        eprintln!("错误: {e:#}");
+        eprintln!("{} {e:#}", ui::err("错误:"));
         std::process::exit(1);
     }
 }
@@ -179,8 +211,12 @@ fn run() -> Result<()> {
     match cli.cmd {
         CliCommand::Auth => {
             print_auth(&auth);
-            println!("默认 Cookie 文件: {}", auth::default_cookie_path().display());
-            println!("匿名镜像源: {}（--mirror 可切换，off 关闭）", cli.mirror);
+            println!("  {} {}", ui::label("默认 Cookie 文件"), auth::default_cookie_path().display());
+            println!("  {} {}", ui::label("匿名镜像源"), cli.mirror);
+            println!(
+                "  {}",
+                ui::dim("提示: 换账号可执行 login qq / login wx / login qqmusic；--anon 强制纯匿名。")
+            );
             Ok(())
         }
 
@@ -192,7 +228,8 @@ fn run() -> Result<()> {
             let client = QqClient::new(auth, cli.proxy.as_deref(), cli.insecure)?;
             let songs = client.search(&keyword, limit)?;
             if songs.is_empty() {
-                println!("没有找到结果");
+                println!("{}", ui::warn("没有找到结果"));
+                println!("  {}", ui::dim("试试更短的关键词，或「歌名 歌手」。"));
                 return Ok(());
             }
             if json {
@@ -214,21 +251,29 @@ fn run() -> Result<()> {
             bridge: bridge_base,
         } => {
             let client = QqClient::new(auth, cli.proxy.as_deref(), cli.insecure)?;
-            print_auth(client.auth());
+            print_auth_brief(client.auth());
             let opts = Opts {
                 bridge: bridge_base,
                 ..opts
             };
             let total = songs.len();
+            let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
             for (i, arg) in songs.iter().enumerate() {
                 let mid = parse_mid(arg);
                 println!("\n[{}/{}] 获取详情: {}", i + 1, total, mid);
-                let song = client.detail(&mid)?;
-                download_song(
-                    &client, &song, quality, &out, dry_run, preview, no_preview, play, &opts,
-                )?;
+                let result = client.detail(&mid).and_then(|song| {
+                    download_song(
+                        &client, &song, quality, &out, dry_run, preview, no_preview, play, &opts,
+                    )
+                });
+                if let Err(e) = result {
+                    if total > 1 {
+                        eprintln!("  {}", ui::failed(&format!("{mid}（{e:#}）")));
+                    }
+                    failures.push((mid, e));
+                }
             }
-            Ok(())
+            finish_batch(failures, total)
         }
 
         CliCommand::Get {
@@ -243,30 +288,38 @@ fn run() -> Result<()> {
             bridge: bridge_base,
         } => {
             let client = QqClient::new(auth, cli.proxy.as_deref(), cli.insecure)?;
-            print_auth(client.auth());
+            print_auth_brief(client.auth());
             let opts = Opts {
                 bridge: bridge_base,
                 ..opts
             };
             let songs = client.search(&keyword, limit)?;
             if songs.is_empty() {
-                println!("没有找到结果");
+                println!("{}", ui::warn("没有找到结果"));
+                println!("  {}", ui::dim("试试更短的关键词，或「歌名 歌手」。"));
                 return Ok(());
             }
             let total = songs.len();
+            let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
             for (i, song) in songs.iter().enumerate() {
                 println!(
-                    "\n[{}/{}] {} - {}",
+                    "\n[{}/{}] {} - {}  {}",
                     i + 1,
                     total,
                     song.artist_str(),
-                    song.name
+                    song.name,
+                    ui::id(&song.mid)
                 );
-                download_song(
+                if let Err(e) = download_song(
                     &client, song, quality, &out, dry_run, preview, no_preview, play, &opts,
-                )?;
+                ) {
+                    if total > 1 {
+                        eprintln!("  {}", ui::failed(&format!("{}（{e:#}）", song.name)));
+                    }
+                    failures.push((song.name.clone(), e));
+                }
             }
-            Ok(())
+            finish_batch(failures, total)
         }
 
         CliCommand::Mint {
@@ -303,8 +356,8 @@ fn run() -> Result<()> {
             Ok(())
         }
 
-        CliCommand::Serve { port } => {
-            bridge::serve(port, auth, cli.proxy.as_deref(), cli.insecure)
+        CliCommand::Serve { port, bind } => {
+            bridge::serve(port, &bind, auth, cli.proxy.as_deref(), cli.insecure)
         }
 
         CliCommand::Login {
@@ -315,12 +368,37 @@ fn run() -> Result<()> {
             let opts = login::LoginOpts {
                 open_browser: !no_open,
                 timeout: std::time::Duration::from_secs(timeout.max(30)),
+                proxy: cli.proxy.clone(),
+                insecure: cli.insecure,
             };
             let auth = login::login(kind, &opts)?;
             print_auth(&auth);
             Ok(())
         }
     }
+}
+
+/// 批量下载的收尾：单曲保持原始错误，批量则继续处理其它歌曲并汇总结果。
+fn finish_batch(mut failures: Vec<(String, anyhow::Error)>, total: usize) -> Result<()> {
+    if failures.is_empty() {
+        if total > 1 {
+            println!();
+            println!("  {}", ui::done(&format!("全部 {total} 首处理完成")));
+        }
+        return Ok(());
+    }
+    if total == 1 {
+        return Err(failures.pop().expect("non-empty").1);
+    }
+    println!();
+    println!(
+        "  {} 共 {} 首，成功 {}，失败 {}",
+        ui::bold("批量结果"),
+        total,
+        total - failures.len(),
+        failures.len()
+    );
+    bail!("{}/{} 首歌曲处理失败", failures.len(), total)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,10 +414,10 @@ fn download_song(
     opts: &Opts,
 ) -> Result<()> {
     println!(
-        "  {} | {} | {}",
-        song.artist_str(),
-        song.name,
-        quality.label()
+        "  {}  {}  {}",
+        ui::bold(&song.name),
+        ui::dim(&song.artist_str()),
+        ui::dim(quality.label())
     );
 
     // 1) 仅试听模式
@@ -361,9 +439,14 @@ fn download_song(
             match bridge::fetch_via_bridge(client.client(), base, &song.mid, q) {
                 Ok(stream) => {
                     println!(
-                        "  票据桥签发: {}{}",
-                        stream.quality.label(),
-                        if stream.quality != quality { "（降级）" } else { "" }
+                        "  {} {}{}",
+                        ui::label("票据桥签发"),
+                        ui::ok(stream.quality.label()),
+                        if stream.quality != quality {
+                            ui::warn("（降级）")
+                        } else {
+                            String::new()
+                        }
                     );
                     return finish_one(
                         client,
@@ -373,11 +456,11 @@ fn download_song(
                         dry_run,
                         play,
                         &format!("会员票据桥 · {}", stream.quality.label()),
-                        song.size_for(q),
+                        song.size_for(stream.quality),
                         opts.verify,
                     );
                 }
-                Err(e) => println!("  票据桥 {} 不可用: {e}", q.label()),
+                Err(e) => println!("  {} {} 不可用: {e}", ui::warn("票据桥"), q.label()),
             }
         }
     }
@@ -389,9 +472,10 @@ fn download_song(
             StreamLookup::Found(stream) => {
                 if q != quality {
                     println!(
-                        "  请求的 {} 不可用，已降级为 {}",
+                        "  {} 请求的 {} 不可用，已降级为 {}",
+                        ui::warn("!"),
                         quality.label(),
-                        q.label()
+                        ui::ok(q.label())
                     );
                 }
                 let source = if client.auth().logged_in {
@@ -414,7 +498,12 @@ fn download_song(
             StreamLookup::Unavailable { result } => {
                 last_result = result;
                 if q == quality {
-                    println!("  {} 被接口拒绝（result={}）", q.label(), result);
+                    println!(
+                        "  {} {} 被接口拒绝（result={}）",
+                        ui::warn("!"),
+                        q.label(),
+                        result
+                    );
                 }
             }
         }
@@ -422,13 +511,14 @@ fn download_song(
 
     // 4) 匿名镜像：QQ 不给，就换一家没有付费墙的曲库
     if opts.mirror != "off" {
+        println!("  {}", ui::dim("QQ 拒绝，切换匿名镜像…"));
         match mirror::resolve(client.client(), song, &opts.mirror) {
             Ok(r) => {
-                println!("  QQ 拒绝，切换匿名镜像…");
                 if r.quality != quality {
                     println!(
-                        "  匿名免费源上限 {}（{} 需要账号/票据桥）",
-                        r.quality.label(),
+                        "  {} 匿名免费源上限 {}（{} 需要账号/票据桥）",
+                        ui::warn("!"),
+                        ui::ok(r.quality.label()),
                         quality.label()
                     );
                 }
@@ -450,7 +540,10 @@ fn download_song(
     if !no_preview {
         match client.trial_url(song)? {
             StreamLookup::Found(stream) => {
-                println!("  所有整曲通道都失败，回落到官方 60 秒试听");
+                println!(
+                    "  {}",
+                    ui::warn("所有整曲通道都失败，回落到官方 60 秒试听")
+                );
                 return finish_one(
                     client,
                     song,
@@ -468,11 +561,11 @@ fn download_song(
     }
 
     let hint = if client.auth().logged_in {
-        "当前账号没有该歌曲的播放/下载权限，或歌曲已下架。"
+        "当前账号没有该歌曲的播放/下载权限，或歌曲已下架。\n  可尝试：换有会员权益的账号、--bridge，或 --mirror migu。"
     } else {
-        "匿名无法获取整曲；可试 --mirror migu，或用会员 Cookie / 票据桥。"
+        "匿名无法获取整曲。\n  可尝试：login qqmusic（QQ音乐 App 扫码）、--bridge，或 --mirror migu。"
     };
-    bail!("未获取到下载地址（result={}）。{}", last_result, hint)
+    bail!("未获取到下载地址（result={}）。\n  {}", last_result, hint)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -490,15 +583,20 @@ fn finish_one(
     let path = target_path(out, song, stream);
 
     println!(
-        "  音质: {}{}",
-        stream.quality.label(),
-        if stream.preview { "（官方 60 秒试听）" } else { "" }
+        "  {} {}{}",
+        ui::label("音质"),
+        ui::ok(stream.quality.label()),
+        if stream.preview {
+            ui::warn("（官方 60 秒试听）")
+        } else {
+            String::new()
+        }
     );
-    println!("  来源: {}", source);
-    println!("  保存到: {}", path.display());
+    println!("  {} {}", ui::label("来源"), ui::id(source));
+    println!("  {} {}", ui::label("保存到"), path.display());
 
     if dry_run {
-        println!("  地址: {}", stream.url);
+        println!("  {} {}", ui::label("地址"), stream.url);
         return Ok(());
     }
 
@@ -511,7 +609,8 @@ fn finish_one(
             }
         })?;
     println!(
-        "  完成: {} ({:.2} MB)",
+        "  {} {}（{:.2} MB）",
+        ui::done("完成"),
         path.display(),
         bytes as f64 / 1024.0 / 1024.0
     );
@@ -528,9 +627,9 @@ fn finish_one(
                         song.duration
                     );
                 }
-                println!("  校验: {:.1}s / 期望 {}s ✓", d, song.duration);
+                println!("  {} {:.1}s / 期望 {}s", ui::done("校验"), d, song.duration);
             }
-            Err(e) => println!("  校验跳过: {e}"),
+            Err(e) => println!("  {} {e}", ui::warn("校验跳过:")),
         }
     }
 
@@ -551,7 +650,11 @@ fn target_path(out: &Path, song: &Song, stream: &StreamUrl) -> PathBuf {
     if stream.preview {
         base.push_str(" [试听60s]");
     }
-    let base = truncate_chars(&base, 180);
+    if base.trim().is_empty() {
+        base = song.mid.clone();
+    }
+    // 按 UTF-8 字节截断：中文歌名按“字符数”截到 180 会超过文件名 255 字节上限。
+    let base = truncate_bytes(&base, 180);
     out.join(format!("{}.{}", base, stream.quality.ext()))
 }
 
@@ -609,24 +712,68 @@ fn sanitize(s: &str) -> String {
     out.trim().trim_matches('.').to_string()
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
+fn truncate_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].trim_end().to_string()
+}
+
+/// 下载前的一行登录态，不打印完整说明。
+fn print_auth_brief(auth: &Auth) {
+    if auth.logged_in {
+        println!(
+            "  {} {}",
+            ui::label("登录态"),
+            ui::ok(&format!(
+                "已登录（uin={}, 来源: {}）",
+                mask(&auth.uin),
+                auth.source
+            ))
+        );
     } else {
-        s.chars().take(max).collect()
+        println!(
+            "  {} {}",
+            ui::label("登录态"),
+            ui::warn("匿名（VIP 曲目自动尝试匿名镜像）")
+        );
     }
 }
 
 fn print_auth(auth: &Auth) {
     if auth.logged_in {
         println!(
-            "登录态: 已登录（uin={}, g_tk={}, 来源: {}）",
-            mask(&auth.uin),
+            "  {} {}（uin={}, g_tk={}, 来源: {}）",
+            ui::label("登录态"),
+            ui::ok("已登录"),
+            ui::id(&mask(&auth.uin)),
             auth.g_tk,
             auth.source
         );
+        println!(
+            "  {}",
+            ui::dim("提示: 320k / FLAC 直链是否可用取决于账号本身的会员权益。")
+        );
     } else {
-        println!("登录态: 匿名 —— QQ 免费曲目直链可用，会员曲目自动走匿名镜像");
+        println!("  {} {}", ui::label("登录态"), ui::warn("匿名"));
+        println!(
+            "  {}",
+            ui::dim("免费曲目可直接下载；VIP 曲目会自动尝试匿名镜像（128k 整曲）。")
+        );
+        println!(
+            "  {} 获取 320k/FLAC：{}",
+            ui::dim("下一步"),
+            ui::bold("qqmusic-dl login qqmusic")
+        );
+        println!(
+            "  {} 或使用会员票据桥：{}",
+            ui::dim("     "),
+            ui::bold("qqmusic-dl serve -p 8080")
+        );
     }
 }
 
@@ -643,26 +790,56 @@ fn mask(s: &str) -> String {
 }
 
 fn print_table(songs: &[Song]) {
-    println!(
-        "{:>3}  {} {} {} {:>5}  曲库音质",
+    // 窄终端自动隐藏专辑列，避免长行折返；歌曲 ID 永远保留。
+    let term_width = console::Term::stdout().size().1 as usize;
+    let (name_w, artist_w, album_w) = if term_width >= 110 {
+        (28, 16, 20)
+    } else if term_width >= 88 {
+        (18, 12, 12)
+    } else {
+        (16, 10, 0)
+    };
+
+    let mut header = format!(
+        "{:>3}  {} {} {}",
         "#",
-        pad("歌名", 30),
-        pad("歌手", 18),
-        pad("专辑", 22),
-        "时长",
+        pad("歌曲ID", 15),
+        pad("歌名", name_w),
+        pad("歌手", artist_w)
     );
-    for (i, s) in songs.iter().enumerate() {
-        println!(
-            "{:>3}  {} {} {} {:>5}  {}",
-            i + 1,
-            pad(&s.name, 30),
-            pad(&s.artist_str(), 18),
-            pad(&s.album, 22),
-            s.duration_str(),
-            quality_flags(s)
-        );
+    if album_w > 0 {
+        header.push_str(&format!(" {} ", pad("专辑", album_w)));
     }
-    println!("\n可用 qqmusic-dl download <songmid> 或 qqmusic-dl get 关键词 下载");
+    header.push_str(&format!("{:>5}  {}", "时长", "曲库音质"));
+    println!("{}", ui::bold(&header));
+
+    for (i, s) in songs.iter().enumerate() {
+        let mut line = format!(
+            "{:>3}  {} {} {}",
+            i + 1,
+            ui::id(&pad(&s.mid, 15)),
+            pad(&s.name, name_w),
+            pad(&s.artist_str(), artist_w)
+        );
+        if album_w > 0 {
+            line.push_str(&format!(" {} ", pad(&s.album, album_w)));
+        }
+        let qtext = quality_flags(s);
+        let qdisp = if qtext == "-" {
+            ui::dim("-")
+        } else {
+            ui::ok(&qtext)
+        };
+        line.push_str(&format!("{:>5}  {}", s.duration_str(), qdisp));
+        println!("{line}");
+    }
+    println!();
+    println!(
+        "  {} 共 {} 首 · 直接下载：{}",
+        ui::dim("提示:"),
+        songs.len(),
+        ui::bold("qqmusic-dl download <歌曲ID>")
+    );
 }
 
 fn print_json(songs: &[Song]) -> Result<()> {
