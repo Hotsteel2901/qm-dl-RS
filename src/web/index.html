@@ -1,0 +1,1808 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>qqmusic-dl · 本地 WebUI</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+:root {
+  --bg: #0a100e;
+  --bg-grad: radial-gradient(1200px 600px at 15% -10%, rgba(49,194,124,.18), transparent 60%),
+             radial-gradient(900px 500px at 100% 0%, rgba(70,130,200,.12), transparent 55%);
+  --panel: rgba(18, 27, 24, .88);
+  --panel-solid: #121b18;
+  --soft: #182420;
+  --soft-2: #1e2d28;
+  --line: #24332e;
+  --line-strong: #30453d;
+  --text: #e8f2ee;
+  --muted: #93a49e;
+  --muted-2: #6e807a;
+  --accent: #31c27c;
+  --accent-bright: #4ade96;
+  --accent-soft: rgba(49, 194, 124, .14);
+  --warn: #e6b450;
+  --warn-soft: rgba(230, 180, 80, .14);
+  --danger: #ef6b6b;
+  --danger-soft: rgba(239, 107, 107, .14);
+  --info: #63b3ed;
+  --info-soft: rgba(99, 179, 237, .14);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --shadow: 0 18px 50px rgba(0, 0, 0, .38);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f3f7f5;
+    --bg-grad: radial-gradient(1200px 600px at 15% -10%, rgba(49,194,124,.16), transparent 60%),
+               radial-gradient(900px 500px at 100% 0%, rgba(70,130,200,.10), transparent 55%);
+    --panel: rgba(255, 255, 255, .92);
+    --panel-solid: #ffffff;
+    --soft: #f0f5f2;
+    --soft-2: #e8efeb;
+    --line: #dce6e1;
+    --line-strong: #c6d5ce;
+    --text: #14241e;
+    --muted: #5f736b;
+    --muted-2: #84958e;
+    --accent: #158f5a;
+    --accent-bright: #0f7a4b;
+    --accent-soft: rgba(21, 143, 90, .10);
+    --warn: #a8720c;
+    --warn-soft: rgba(168, 114, 12, .10);
+    --danger: #c43d3d;
+    --danger-soft: rgba(196, 61, 61, .10);
+    --info: #2d6fa8;
+    --info-soft: rgba(45, 111, 168, .10);
+    --shadow: 0 18px 45px rgba(20, 50, 38, .10);
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  color: var(--text);
+  background: var(--bg-grad), var(--bg);
+  background-attachment: fixed;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+               "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+body.modal-open { overflow: hidden; }
+body.player-open #app { padding-bottom: 108px; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+a { color: var(--accent); }
+::selection { background: var(--accent-soft); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+#app {
+  width: min(1520px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 20px 0 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* ---------- top bar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+  width: 42px; height: 42px; border-radius: 13px;
+  background: linear-gradient(145deg, var(--accent-bright), var(--accent));
+  display: grid; place-items: center;
+  box-shadow: 0 8px 24px rgba(49, 194, 124, .22);
+}
+.brand-mark svg { width: 24px; height: 24px; display: block; }
+.brand h1 { font-size: 19px; margin: 0; letter-spacing: .2px; }
+.brand p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.top-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 11px; border-radius: 99px;
+  background: var(--soft); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12.5px; white-space: nowrap;
+}
+.chip.ok { color: var(--accent); border-color: rgba(49,194,124,.35); background: var(--accent-soft); }
+.chip.warn { color: var(--warn); border-color: rgba(230,180,80,.35); background: var(--warn-soft); }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.btn {
+  border: 1px solid var(--line-strong);
+  background: var(--soft);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13.5px;
+  transition: background .15s ease, border-color .15s ease, transform .08s ease, opacity .15s;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--soft-2); border-color: var(--muted-2); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary {
+  background: linear-gradient(145deg, var(--accent-bright), var(--accent));
+  border-color: transparent; color: #07130d; font-weight: 700;
+}
+.btn.primary:hover { filter: brightness(1.05); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 5px 10px; font-size: 12.5px; border-radius: 8px; }
+.btn.danger { color: var(--danger); border-color: rgba(239,107,107,.35); background: var(--danger-soft); }
+.icon-btn {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 9px; border: 1px solid var(--line);
+  background: var(--soft); padding: 0; font-size: 15px;
+}
+.icon-btn:hover { background: var(--soft-2); }
+kbd {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--soft-2); border: 1px solid var(--line-strong);
+  border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: var(--muted);
+}
+
+.banner {
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: var(--danger-soft); border: 1px solid rgba(239,107,107,.35);
+  color: var(--danger); font-size: 13px;
+}
+
+/* ---------- hero / search ---------- */
+.hero {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  backdrop-filter: blur(10px);
+}
+.search-row { display: flex; gap: 10px; }
+.search-box {
+  flex: 1; display: flex; align-items: center; gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 0 14px;
+  min-width: 0;
+  transition: border-color .15s, box-shadow .15s;
+}
+.search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.search-box .glyph { color: var(--muted); font-size: 18px; }
+.search-box input {
+  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent;
+  padding: 12px 0; font-size: 15.5px;
+}
+.search-box input::placeholder { color: var(--muted-2); }
+.options {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line);
+  color: var(--muted); font-size: 12.5px;
+}
+.options label { display: inline-flex; align-items: center; gap: 6px; }
+.options .group-label { color: var(--muted-2); }
+.segmented {
+  display: inline-flex; background: var(--bg); border: 1px solid var(--line-strong);
+  border-radius: 9px; padding: 2px; gap: 2px;
+}
+.segmented button {
+  border: 0; background: transparent; color: var(--muted);
+  border-radius: 7px; padding: 5px 10px; font-size: 12.5px; font-weight: 600;
+}
+.segmented button.active {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(49,194,124,.22);
+}
+select {
+  background: var(--bg); border: 1px solid var(--line-strong);
+  border-radius: 8px; padding: 5px 8px; font-size: 12.5px;
+}
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  display: inline-grid; place-items: center;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::after {
+  content: "";
+  width: 8px; height: 4px;
+  border-left: 2px solid #07130d;
+  border-bottom: 2px solid #07130d;
+  transform: rotate(-45deg) translateY(-1px);
+}
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- layout ---------- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(340px, .85fr);
+  gap: 18px;
+  align-items: start;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  min-width: 0;
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+}
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.panel-head h2 { margin: 0; font-size: 15px; letter-spacing: .2px; }
+.panel-head .head-left { display: flex; align-items: baseline; gap: 10px; }
+.panel-head .head-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.muted { color: var(--muted); font-size: 12.5px; }
+.count-pill {
+  background: var(--soft); border: 1px solid var(--line);
+  border-radius: 99px; padding: 1px 8px; font-size: 11.5px; color: var(--muted);
+}
+
+/* ---------- results ---------- */
+.results-head, .song-row {
+  display: grid;
+  grid-template-columns: 34px 30px minmax(150px, 1.9fr) minmax(84px, .9fr) minmax(84px, .9fr) 58px 98px 132px 42px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+}
+.results-head {
+  color: var(--muted-2); font-size: 11.5px; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+  position: sticky; top: 0; z-index: 2;
+}
+.results { max-height: 62vh; overflow: auto; }
+.song-row {
+  border-bottom: 1px solid var(--line);
+  transition: background .12s ease;
+  cursor: pointer;
+  outline: none;
+}
+.song-row:last-child { border-bottom: 0; }
+.song-row:hover { background: var(--soft); }
+.song-row:focus-visible { background: var(--soft-2); box-shadow: inset 3px 0 0 var(--accent); }
+.song-row.selected { background: var(--accent-soft); }
+.song-row.selected:hover { background: rgba(49,194,124,.18); }
+.song-row .idx { color: var(--muted-2); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.song-main { min-width: 0; }
+.song-name { display: block; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-sub { display: none; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.song-row .artist, .song-row .album {
+  color: var(--muted); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.song-row .duration { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.song-row .mid {
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qflags { display: flex; gap: 4px; flex-wrap: wrap; }
+.qflag {
+  font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 5px;
+  background: var(--info-soft); color: var(--info);
+}
+.qflag.high { background: var(--accent-soft); color: var(--accent); }
+.qflag.flac { background: rgba(190,120,255,.12); color: #c08bff; }
+@media (prefers-color-scheme: light) { .qflag.flac { color: #7b3fd1; } }
+.qflag.none { background: transparent; color: var(--muted-2); padding-left: 0; }
+.icon-download {
+  width: 32px; height: 32px; border-radius: 9px; border: 1px solid transparent;
+  background: transparent; color: var(--muted); display: grid; place-items: center;
+  font-size: 16px; transition: all .15s;
+}
+.icon-download:hover { background: var(--accent-soft); color: var(--accent); border-color: rgba(49,194,124,.3); }
+.results-empty {
+  padding: 54px 24px; text-align: center; color: var(--muted);
+}
+.results-empty .big { font-size: 34px; color: var(--muted-2); margin-bottom: 8px; }
+.results-empty p { margin: 4px 0; }
+.results-empty .hint { color: var(--muted-2); font-size: 12.5px; }
+.skeleton { padding: 10px 16px; display: grid; gap: 12px; }
+.skeleton .line {
+  height: 30px; border-radius: 8px;
+  background: linear-gradient(90deg, var(--soft) 25%, var(--soft-2) 37%, var(--soft) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* ---------- queue ---------- */
+.queue-panel .panel-head { align-items: center; }
+.jobs { max-height: 62vh; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.job {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 13px;
+  display: flex; flex-direction: column; gap: 8px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.job.is-active { border-color: rgba(49,194,124,.35); box-shadow: 0 0 0 1px rgba(49,194,124,.08); }
+.job.is-failed { border-color: rgba(239,107,107,.32); }
+.job-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.job-title { min-width: 0; display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.job-name { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.job-artist { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-chip {
+  flex: none; font-size: 10.5px; font-weight: 750; letter-spacing: .03em;
+  padding: 2px 8px; border-radius: 99px; white-space: nowrap;
+  background: var(--info-soft); color: var(--info);
+}
+.status-chip.queued { background: var(--soft-2); color: var(--muted); }
+.status-chip.resolving { background: var(--info-soft); color: var(--info); }
+.status-chip.downloading { background: var(--accent-soft); color: var(--accent); }
+.status-chip.verifying { background: var(--info-soft); color: var(--info); }
+.status-chip.done { background: var(--accent-soft); color: var(--accent); }
+.status-chip.failed { background: var(--danger-soft); color: var(--danger); }
+.status-chip.cancelled { background: var(--warn-soft); color: var(--warn); }
+.job-meta { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted-2); font-size: 11.5px; }
+.job-meta .job-q { color: var(--accent); font-weight: 650; }
+.job-meta .job-q.preview { color: var(--warn); }
+.bar {
+  height: 6px; border-radius: 99px; background: var(--bg);
+  overflow: hidden; position: relative; border: 1px solid var(--line);
+}
+.bar-fill {
+  height: 100%; width: 0%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+  transition: width .35s ease;
+}
+.bar-fill.done { background: var(--accent); }
+.bar-fill.error { background: var(--danger); }
+.bar.indeterminate .bar-fill {
+  width: 38% !important;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(300%); }
+}
+.job-foot { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11.5px; }
+.job-stage { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-numbers { color: var(--muted-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.job-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.job-actions .btn { padding: 4px 9px; font-size: 11.5px; border-radius: 7px; }
+.job-log { margin-top: 2px; }
+.job-log summary { cursor: pointer; color: var(--muted-2); font-size: 11.5px; user-select: none; }
+.job-log pre {
+  margin: 7px 0 0; padding: 8px 10px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--line);
+  color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+  white-space: pre-wrap; word-break: break-word; max-height: 150px; overflow: auto;
+}
+.jobs-empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+
+/* ---------- footer ---------- */
+.footer {
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  color: var(--muted-2); font-size: 11.5px; padding: 0 4px;
+}
+.footer code { font-family: var(--mono); color: var(--muted); }
+
+/* ---------- player ---------- */
+.player {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  width: min(900px, calc(100% - 24px));
+  z-index: 50;
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 14px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.45);
+}
+.player-info { min-width: 0; display: flex; flex-direction: column; }
+#player-title { font-weight: 650; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#player-sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player audio { flex: 1; height: 34px; min-width: 160px; }
+@media (max-width: 600px) {
+  .player { flex-wrap: wrap; }
+  .player audio { order: 3; width: 100%; flex-basis: 100%; }
+}
+
+/* ---------- modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(3, 8, 6, .66);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  animation: fade .16s ease;
+}
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: min(760px, 100%);
+  max-height: min(88vh, 860px);
+  overflow: auto;
+  background: var(--panel-solid);
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  box-shadow: 0 30px 90px rgba(0,0,0,.5);
+  padding: 18px 20px 20px;
+  animation: rise .18s ease;
+}
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.modal-head h2 { margin: 0; font-size: 17px; }
+.modal p.lead { margin: 7px 0 0; color: var(--muted); font-size: 12.5px; }
+.modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+.tabs { display: flex; gap: 6px; margin: 16px 0 14px; flex-wrap: wrap; }
+.tab {
+  border: 1px solid var(--line); background: var(--soft); color: var(--muted);
+  padding: 7px 13px; border-radius: 9px; font-size: 13px;
+}
+.tab.active { border-color: rgba(49,194,124,.4); background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+.tab:disabled { opacity: .5; cursor: not-allowed; }
+.login-body { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; }
+.qr-box {
+  background: #fff; border-radius: 14px; padding: 12px;
+  display: grid; place-items: center; min-height: 240px;
+  border: 1px solid var(--line);
+}
+.qr-box img { width: 100%; max-width: 216px; height: auto; display: block; image-rendering: pixelated; }
+#login-qr-placeholder { color: #5f736b; font-size: 12.5px; text-align: center; padding: 12px; }
+.login-info { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.status-line { font-size: 13px; color: var(--muted); }
+.status-line.ok { color: var(--accent); }
+.status-line.err { color: var(--danger); }
+.log {
+  margin: 0; flex: 1; min-height: 120px; max-height: 240px; overflow: auto;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--line);
+  color: var(--muted); font-family: var(--mono); font-size: 11px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.help-grid { display: grid; grid-template-columns: 130px minmax(0,1fr); gap: 7px 16px; margin-top: 14px; font-size: 13px; }
+.help-grid .k { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+.help-grid .section { grid-column: 1 / -1; margin-top: 8px; color: var(--muted); font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+
+/* ---------- toasts ---------- */
+.toasts {
+  position: fixed; right: 18px; bottom: 18px; z-index: 200;
+  display: flex; flex-direction: column; gap: 8px; max-width: min(420px, calc(100% - 36px));
+}
+.toast {
+  padding: 10px 14px; border-radius: 10px;
+  background: var(--panel-solid); border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow); font-size: 13px;
+  animation: toast-in .18s ease;
+  border-left: 3px solid var(--info);
+}
+.toast.ok { border-left-color: var(--accent); }
+.toast.warn { border-left-color: var(--warn); }
+.toast.err { border-left-color: var(--danger); }
+@keyframes toast-in { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---------- responsive ---------- */
+@media (max-width: 1200px) {
+  .results-head, .song-row { grid-template-columns: 34px 30px minmax(140px,1.9fr) minmax(90px,.9fr) 58px 98px 42px; }
+  .results-head .album, .song-row .album,
+  .results-head .mid, .song-row .mid { display: none; }
+}
+@media (max-width: 980px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .results, .jobs { max-height: none; }
+  .results-head { position: static; }
+  .queue-panel { order: 2; }
+}
+@media (max-width: 720px) {
+  #app { width: calc(100% - 22px); padding-top: 12px; gap: 12px; }
+  .topbar { align-items: flex-start; }
+  .top-status { width: 100%; justify-content: flex-start; }
+  .hero { padding: 13px; }
+  .search-row { flex-wrap: wrap; }
+  .search-box { flex-basis: 100%; }
+  .search-row > .btn.primary { width: 100%; }
+  .options { gap: 10px; }
+  .results-head, .song-row {
+    grid-template-columns: 30px 26px minmax(120px, 1fr) 56px 36px;
+  }
+  .results-head .artist, .song-row .artist,
+  .results-head .album, .song-row .album,
+  .results-head .mid, .song-row .mid,
+  .results-head .duration, .song-row .duration { display: none; }
+  .song-sub { display: block; }
+  .results-head { padding: 8px 12px; }
+  .song-row { padding: 9px 12px; }
+  .qflags { justify-content: flex-end; }
+  .login-body { grid-template-columns: 1fr; }
+  .qr-box { min-height: 200px; }
+  .player { bottom: 8px; width: calc(100% - 16px); }
+}
+@media (max-width: 430px) {
+  .results-head, .song-row { grid-template-columns: 28px 24px minmax(100px,1fr) 64px 32px; }
+  .qflag { padding: 1px 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="#07130d">
+          <circle cx="23" cy="45" r="9"></circle>
+          <rect x="29" y="15" width="6" height="30" rx="3"></rect>
+          <path d="M35 16c9 2 14 7 14 14" fill="none" stroke="#07130d" stroke-width="6" stroke-linecap="round"></path>
+        </svg>
+      </div>
+      <div>
+        <h1>qqmusic-dl</h1>
+        <p>本地音乐下载器 · 匿名镜像 / 会员直链 / 票据桥</p>
+      </div>
+    </div>
+    <div class="top-status">
+      <span id="auth-badge" class="chip"><span class="dot"></span>读取登录态…</span>
+      <span id="bridge-badge" class="chip" hidden>票据桥</span>
+      <button id="login-btn" class="btn ghost" type="button">扫码登录</button>
+      <button id="refresh-btn" class="icon-btn" type="button" title="刷新登录态" aria-label="刷新登录态">↻</button>
+      <button id="help-btn" class="icon-btn" type="button" title="快捷键帮助" aria-label="快捷键帮助">?</button>
+    </div>
+  </header>
+
+  <div id="offline-banner" class="banner" hidden>无法连接本地服务：请确认 <code>qqmusic-dl web</code> 仍在运行。</div>
+
+  <section class="hero" aria-label="搜索">
+    <div class="search-row">
+      <div class="search-box">
+        <span class="glyph" aria-hidden="true">⌕</span>
+        <input id="search-input" type="search" autocomplete="off" spellcheck="false"
+               placeholder="搜索歌名 / 歌手，例如「晴天 周杰伦」" aria-label="搜索关键词">
+        <kbd>/</kbd>
+      </div>
+      <button id="search-btn" class="btn primary" type="button">搜索</button>
+    </div>
+    <div class="options">
+      <span class="group-label">音质</span>
+      <div class="segmented" id="quality-group" role="group" aria-label="下载音质">
+        <button type="button" data-q="128">128k</button>
+        <button type="button" data-q="320">320k</button>
+        <button type="button" data-q="flac">FLAC</button>
+      </div>
+      <label><span class="group-label">每页</span>
+        <select id="limit-select" aria-label="搜索结果数量">
+          <option value="10">10</option>
+          <option value="20">20</option>
+          <option value="30">30</option>
+          <option value="50">50</option>
+        </select>
+      </label>
+      <label><input id="preview-check" type="checkbox"> 仅试听 60s</label>
+      <label><input id="fallback-check" type="checkbox"> 整曲失败时回落试听</label>
+      <label><span class="group-label">镜像</span>
+        <select id="mirror-select" aria-label="匿名镜像源">
+          <option value="auto">auto</option>
+          <option value="migu">咪咕</option>
+          <option value="kuwo">酷我</option>
+          <option value="netease">网易云</option>
+          <option value="off">关闭</option>
+        </select>
+      </label>
+      <label><input id="verify-check" type="checkbox"> 时长校验</label>
+    </div>
+  </section>
+
+  <main class="layout">
+    <section class="panel results-panel" aria-label="搜索结果">
+      <div class="panel-head">
+        <div class="head-left">
+          <h2>搜索结果</h2>
+          <span id="result-count" class="muted">尚未搜索</span>
+          <span id="selected-pill" class="count-pill" hidden>已选 0</span>
+        </div>
+        <div class="head-right">
+          <button id="select-all-btn" class="btn small ghost" type="button" disabled>全选</button>
+          <button id="download-selected-btn" class="btn primary" type="button" disabled>下载选中 <span id="selected-count">0</span></button>
+        </div>
+      </div>
+      <div id="results-head" class="results-head" hidden aria-hidden="true">
+        <span></span><span>#</span><span>歌名</span><span class="artist">歌手</span><span class="album">专辑</span><span class="duration">时长</span><span>音质</span><span class="mid">歌曲ID</span><span></span>
+      </div>
+      <div id="results" class="results" role="list"></div>
+      <div id="results-loading" class="skeleton" hidden>
+        <div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div>
+      </div>
+      <div id="results-empty" class="results-empty">
+        <div class="big" aria-hidden="true">♪</div>
+        <p>搜索你想下载的歌</p>
+        <p class="hint">支持「歌名 歌手」；结果里勾选多首可批量加入队列</p>
+      </div>
+    </section>
+
+    <aside class="panel queue-panel" aria-label="下载队列">
+      <div class="panel-head">
+        <div class="head-left">
+          <h2>下载队列</h2>
+          <span id="queue-summary" class="muted">暂无任务</span>
+        </div>
+        <div class="head-right">
+          <button id="clear-btn" class="btn small ghost" type="button" disabled>清理已完成</button>
+        </div>
+      </div>
+      <div id="jobs" class="jobs"></div>
+      <div id="jobs-empty" class="jobs-empty">
+        <p>队列是空的</p>
+        <p class="muted">在左侧搜索结果里点「↓」或勾选后下载</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>服务端 <code id="version-text">v-</code> · 下载目录 <code id="outdir-text">-</code></span>
+    <span>所有请求只在本机/本地网络流转 · <a href="#" id="footer-help">快捷键</a></span>
+  </footer>
+</div>
+
+<div id="player" class="player" hidden>
+  <div class="player-info">
+    <span id="player-title">-</span>
+    <span id="player-sub">-</span>
+  </div>
+  <audio id="audio" controls preload="none"></audio>
+  <button id="player-close" class="icon-btn" type="button" aria-label="关闭播放器">×</button>
+</div>
+
+<div id="login-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="login-title" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="login-title">扫码登录</h2>
+      <button class="icon-btn" type="button" data-close-login aria-label="关闭">×</button>
+    </div>
+    <p class="lead">登录后可用账号的 320k / FLAC 直链；匿名也能下载免费曲目。Cookie 只写入本机配置文件。</p>
+    <div class="tabs" id="login-tabs" role="tablist">
+      <button class="tab active" type="button" role="tab" data-kind="qqmusic">QQ音乐 App</button>
+      <button class="tab" type="button" role="tab" data-kind="wx">微信</button>
+      <button class="tab" type="button" role="tab" data-kind="qq">QQ</button>
+    </div>
+    <div class="login-body">
+      <div class="qr-box">
+        <img id="login-qr" alt="登录二维码" hidden>
+        <div id="login-qr-placeholder">点击「开始登录」生成二维码</div>
+      </div>
+      <div class="login-info">
+        <div id="login-status" class="status-line">未开始</div>
+        <pre id="login-log" class="log">等待开始…</pre>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="login-cancel" class="btn" type="button" hidden>取消登录</button>
+      <button id="login-start" class="btn primary" type="button">开始登录</button>
+      <button class="btn ghost" type="button" data-close-login>关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="help-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="help-title" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="help-title">快捷键与说明</h2>
+      <button class="icon-btn" type="button" data-close-help aria-label="关闭">×</button>
+    </div>
+    <div class="help-grid">
+      <span class="section">页面</span>
+      <span class="k">/</span><span>聚焦搜索框</span>
+      <span class="k">Enter</span><span>搜索（搜索框内）/ 开始登录（登录弹窗内）</span>
+      <span class="k">Esc</span><span>关闭弹窗</span>
+      <span class="k">?</span><span>打开本帮助</span>
+      <span class="k">Ctrl / ⌘ + Enter</span><span>下载已选歌曲</span>
+      <span class="section">搜索与队列</span>
+      <span class="k">勾选 / 点击行</span><span>选择歌曲；可全选后批量下载</span>
+      <span class="k">↓</span><span>单首下载（结果行右侧按钮）</span>
+      <span class="k">取消</span><span>中止正在解析/下载的任务；已下载的 .part 会保留</span>
+      <span class="k">播放</span><span>已完成任务可在浏览器内播放（支持拖动进度条）</span>
+      <span class="k">重试</span><span>失败/取消的任务按原音质重新入队</span>
+      <span class="section">取流顺序</span>
+      <span>1</span><span>QQ 原生 vkey 直链（免费曲目匿名可用）</span>
+      <span>2</span><span>会员票据桥（TUI/Web 用 --bridge 指定）</span>
+      <span>3</span><span>匿名镜像：咪咕 / 酷我 / 网易云（128k 整曲）</span>
+      <span>4</span><span>官方 60 秒试听（可关闭回落）</span>
+      <span class="section">说明</span>
+      <span>时长校验</span><span>下载后用本地帧解析核对歌曲时长；对不上会删除文件并报错，防止拿到片段/串版</span>
+      <span>安全</span><span>默认只监听 127.0.0.1；POST 要求同源 JSON；文件只从任务记录读取</span>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+  const state = {
+    health: null,
+    songs: [],
+    selected: new Set(),
+    rowEls: new Map(),
+    jobs: new Map(),
+    jobEls: new Map(),
+    jobOrder: [],
+    quality: "320",
+    limit: 20,
+    preview: false,
+    fallback: true,
+    mirror: "auto",
+    verify: true,
+    searching: false,
+    jobsFetching: false,
+    loginKind: "qqmusic",
+    loginRunning: false,
+    loginTimer: null,
+    loginQrUrl: "",
+    lastFocus: null,
+  };
+
+  // Safari 隐私模式等场景 localStorage 可能抛异常；失败时静默退回默认值。
+  const store = {
+    get(key, fallback) {
+      try {
+        const value = localStorage.getItem(key);
+        return value === null ? fallback : value;
+      } catch (_) {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      try { localStorage.setItem(key, value); } catch (_) {}
+    },
+  };
+
+  const MIRRORS = ["auto", "migu", "kuwo", "netease", "off"];
+  const storedQuality = store.get("qmdl.quality", null);
+  const storedMirror = store.get("qmdl.mirror", null);
+  const storedVerify = store.get("qmdl.verify", null);
+  let qualityExplicit = ["128", "320", "flac"].includes(storedQuality);
+  let mirrorExplicit = MIRRORS.includes(storedMirror);
+  let verifyExplicit = storedVerify !== null;
+  const prefs = {
+    quality: qualityExplicit ? storedQuality : "320",
+    limit: Number(store.get("qmdl.limit", "20")),
+    preview: store.get("qmdl.preview", "0") === "1",
+    fallback: store.get("qmdl.fallback", "1") !== "0",
+    mirror: mirrorExplicit ? storedMirror : "auto",
+    verify: verifyExplicit ? storedVerify !== "0" : true,
+  };
+  if (!["128", "320", "flac"].includes(prefs.quality)) prefs.quality = "320";
+  if (![10, 20, 30, 50].includes(Number(prefs.limit))) prefs.limit = 20;
+  if (!["auto", "migu", "kuwo", "netease", "off"].includes(prefs.mirror)) prefs.mirror = "auto";
+
+  function savePrefs() {
+    store.set("qmdl.quality", prefs.quality);
+    store.set("qmdl.limit", String(prefs.limit));
+    store.set("qmdl.preview", prefs.preview ? "1" : "0");
+    store.set("qmdl.fallback", prefs.fallback ? "1" : "0");
+    store.set("qmdl.mirror", prefs.mirror);
+    store.set("qmdl.verify", prefs.verify ? "1" : "0");
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = n, i = -1;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + " " + units[i];
+  }
+
+  function fmtSpeed(n) {
+    if (!n || !isFinite(n) || n <= 0) return "";
+    return fmtBytes(n) + "/s";
+  }
+
+  function fmtElapsed(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    if (sec < 60) return sec + "s";
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  async function api(path, options = {}) {
+    const opts = { ...options };
+    opts.headers = { ...(options.headers || {}) };
+    if (opts.body && !opts.headers["Content-Type"]) {
+      opts.headers["Content-Type"] = "application/json";
+    }
+    if (!opts.signal) {
+      try { opts.signal = AbortSignal.timeout(options.timeout || 45000); } catch (_) {}
+    }
+    const res = await fetch(path, opts);
+    let data;
+    try { data = await res.json(); } catch (_) { data = { ok: false, error: "HTTP " + res.status }; }
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.error || ("HTTP " + res.status));
+    }
+    return data;
+  }
+
+  function toast(message, type = "info", ms = 4200) {
+    const box = $("#toasts");
+    const node = el("div", "toast " + type, message);
+    box.appendChild(node);
+    setTimeout(() => {
+      node.style.opacity = "0";
+      node.style.transform = "translateY(4px)";
+      node.style.transition = "opacity .2s, transform .2s";
+      setTimeout(() => node.remove(), 220);
+    }, ms);
+  }
+
+  function showOffline() {
+    $("#offline-banner").hidden = false;
+  }
+  function hideOffline() {
+    $("#offline-banner").hidden = true;
+  }
+
+  // ---------------- options ----------------
+
+  function applyPrefs() {
+    state.quality = prefs.quality;
+    state.limit = Number(prefs.limit);
+    state.preview = prefs.preview;
+    state.fallback = prefs.fallback;
+    state.mirror = prefs.mirror;
+    state.verify = prefs.verify;
+    $$("#quality-group button").forEach((b) => b.classList.toggle("active", b.dataset.q === state.quality));
+    $("#limit-select").value = String(state.limit);
+    $("#preview-check").checked = state.preview;
+    $("#fallback-check").checked = state.fallback;
+    $("#mirror-select").value = state.mirror;
+    $("#verify-check").checked = state.verify;
+  }
+
+  function bindOptions() {
+    $$("#quality-group button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        qualityExplicit = true;
+        prefs.quality = btn.dataset.q;
+        applyPrefs();
+        savePrefs();
+      });
+    });
+    $("#limit-select").addEventListener("change", (e) => {
+      prefs.limit = Number(e.target.value);
+      applyPrefs();
+      savePrefs();
+    });
+    $("#preview-check").addEventListener("change", (e) => {
+      prefs.preview = e.target.checked;
+      applyPrefs();
+      savePrefs();
+    });
+    $("#fallback-check").addEventListener("change", (e) => {
+      prefs.fallback = e.target.checked;
+      applyPrefs();
+      savePrefs();
+    });
+    $("#mirror-select").addEventListener("change", (e) => {
+      mirrorExplicit = true;
+      prefs.mirror = e.target.value;
+      applyPrefs();
+      savePrefs();
+    });
+    $("#verify-check").addEventListener("change", (e) => {
+      verifyExplicit = true;
+      prefs.verify = e.target.checked;
+      applyPrefs();
+      savePrefs();
+    });
+  }
+
+  // ---------------- health ----------------
+
+  async function refreshHealth() {
+    try {
+      const data = await api("/api/health", { timeout: 12000 });
+      state.health = data;
+      hideOffline();
+      let syncDefaults = false;
+      if (!qualityExplicit && ["128", "320", "flac"].includes(data.default_quality)) {
+        qualityExplicit = true;
+        prefs.quality = data.default_quality;
+        syncDefaults = true;
+      }
+      if (!mirrorExplicit && MIRRORS.includes(data.mirror)) {
+        mirrorExplicit = true;
+        prefs.mirror = data.mirror;
+        syncDefaults = true;
+      }
+      if (!verifyExplicit && typeof data.verify === "boolean") {
+        verifyExplicit = true;
+        prefs.verify = data.verify;
+        syncDefaults = true;
+      }
+      if (syncDefaults) applyPrefs();
+      const badge = $("#auth-badge");
+      if (data.auth && data.auth.error) {
+        badge.className = "chip warn";
+        badge.replaceChildren(el("span", "dot"), el("span", "", "登录态读取失败"));
+        badge.title = String(data.auth.error);
+      } else if (data.auth && data.auth.logged_in) {
+        badge.className = "chip ok";
+        badge.replaceChildren(el("span", "dot"), el("span", "", "已登录 · " + data.auth.uin));
+        badge.title = data.auth.source || "";
+      } else {
+        badge.className = "chip warn";
+        badge.replaceChildren(el("span", "dot"), el("span", "", "匿名模式"));
+        badge.title = data.anon ? "服务以 --anon 启动" : (data.auth && data.auth.source) || "";
+      }
+      const canLogin = data.login_available !== false;
+      $("#login-btn").disabled = !canLogin;
+      $("#login-btn").title = canLogin
+        ? "扫码登录"
+        : (data.login_blocked_reason || "当前配置下登录不会生效");
+      const bridge = data.bridge || "";
+      $("#bridge-badge").hidden = !bridge;
+      $("#bridge-badge").textContent = bridge ? "票据桥" : "";
+      $("#bridge-badge").title = bridge;
+      $("#version-text").textContent = "v" + (data.version || "?");
+      $("#outdir-text").textContent = data.out_dir || "-";
+      $("#outdir-text").title = data.out_dir || "";
+    } catch (e) {
+      showOffline();
+    }
+  }
+
+  // ---------------- search ----------------
+
+  function setSearching(on) {
+    state.searching = on;
+    const btn = $("#search-btn");
+    btn.disabled = on;
+    btn.textContent = on ? "搜索中…" : "搜索";
+    $("#results-loading").hidden = !on;
+    if (on) {
+      $("#results-empty").hidden = true;
+      $("#results-head").hidden = true;
+      $("#results").replaceChildren();
+      state.rowEls.clear();
+    }
+  }
+
+  function emptyResults(title, hint) {
+    const box = $("#results-empty");
+    box.replaceChildren(
+      el("div", "big", "♪"),
+      el("p", "", title || "搜索你想下载的歌"),
+      el("p", "hint", hint || "支持「歌名 歌手」；结果里勾选多首可批量加入队列")
+    );
+    box.hidden = false;
+  }
+
+  async function doSearch() {
+    const input = $("#search-input");
+    const q = input.value.trim();
+    if (!q) {
+      toast("请输入歌名或歌手", "warn");
+      input.focus();
+      return;
+    }
+    if (state.searching) return;
+    state.selected.clear();
+    updateSelectionUI();
+    setSearching(true);
+    try {
+      const data = await api(
+        "/api/search?q=" + encodeURIComponent(q) + "&limit=" + state.limit,
+        { timeout: 70000 }
+      );
+      state.songs = data.songs || [];
+      state.selected.clear();
+      renderResults();
+      if (state.songs.length) {
+        $("#result-count").textContent = "共 " + state.songs.length + " 首";
+      } else {
+        emptyResults("没有找到结果", "试试更短的关键词，或「歌名 歌手」");
+        $("#result-count").textContent = "0 首";
+      }
+    } catch (e) {
+      state.songs = [];
+      state.selected.clear();
+      renderResults();
+      emptyResults("搜索失败", e.message);
+      $("#result-count").textContent = "搜索失败";
+      toast("搜索失败: " + e.message, "err", 7000);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function qualityFlags(flags) {
+    const wrap = el("span", "qflags");
+    if (!flags || flags === "-") {
+      wrap.appendChild(el("span", "qflag none", "-"));
+      return wrap;
+    }
+    const options = flags.split("/");
+    // 只展示最高可用音质，完整列表放进 title：三枚徽章在 98px 列宽里会换行，
+    // 把每行撑高一倍。
+    const best = options.includes("FLAC") ? "FLAC"
+      : options.some((f) => f.includes("320")) ? "320k"
+      : "128k";
+    const badge = el("span", "qflag", best);
+    if (best === "FLAC") badge.classList.add("flac");
+    else if (best === "320k") badge.classList.add("high");
+    badge.title = "可选音质：" + options.join(" / ");
+    wrap.appendChild(badge);
+    return wrap;
+  }
+
+  function createSongRow(song, index) {
+    const row = el("div", "song-row");
+    row.dataset.mid = song.songmid;
+    row.setAttribute("role", "listitem");
+    row.tabIndex = 0;
+    row.setAttribute("aria-label", song.name + " - " + (song.artist || ""));
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = state.selected.has(song.songmid);
+    check.setAttribute("aria-label", "选择 " + song.name);
+    check.addEventListener("change", () => {
+      toggleSong(song.songmid, check.checked);
+    });
+    const checkWrap = el("div", "check-cell");
+    checkWrap.appendChild(check);
+
+    const main = el("div", "song-main");
+    main.title = song.name;
+    const nameCell = el("span", "song-name", song.name);
+    const subCell = el("span", "song-sub",
+      (song.artist || "") + (song.album ? " · " + song.album : ""));
+    subCell.title = subCell.textContent;
+    main.append(nameCell, subCell);
+    const artistCell = el("span", "artist", song.artist || "-");
+    artistCell.title = song.artist || "";
+    const albumCell = el("span", "album", song.album || "-");
+    albumCell.title = song.album || "";
+
+    const download = el("button", "icon-download", "↓");
+    download.type = "button";
+    download.title = "下载这首歌";
+    download.setAttribute("aria-label", "下载 " + song.name);
+    download.addEventListener("click", (e) => {
+      e.stopPropagation();
+      enqueue([song]);
+    });
+
+    row.append(
+      checkWrap,
+      el("span", "idx", String(index + 1)),
+      main,
+      artistCell,
+      albumCell,
+      el("span", "duration", song.duration_text || ""),
+      qualityFlags(song.quality_flags),
+      el("code", "mid", song.songmid),
+      download
+    );
+
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("button, input, a, label")) return;
+      toggleSong(song.songmid);
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggleSong(song.songmid);
+      }
+    });
+
+    if (state.selected.has(song.songmid)) row.classList.add("selected");
+    return row;
+  }
+
+  function renderResults() {
+    const list = $("#results");
+    list.replaceChildren();
+    state.rowEls.clear();
+    $("#results-head").hidden = state.songs.length === 0;
+    if (!state.songs.length) {
+      if (!$("#results-loading").hidden) return;
+      emptyResults();
+      updateSelectionUI();
+      return;
+    }
+    $("#results-empty").hidden = true;
+    const frag = document.createDocumentFragment();
+    state.songs.forEach((song, i) => {
+      const row = createSongRow(song, i);
+      state.rowEls.set(song.songmid, row);
+      frag.appendChild(row);
+    });
+    list.appendChild(frag);
+    updateSelectionUI();
+  }
+
+  function toggleSong(mid, force) {
+    const has = state.selected.has(mid);
+    const next = force === undefined ? !has : !!force;
+    if (next) state.selected.add(mid);
+    else state.selected.delete(mid);
+    const row = state.rowEls.get(mid);
+    if (row) {
+      row.classList.toggle("selected", next);
+      const box = $("input[type=checkbox]", row);
+      if (box) box.checked = next;
+    }
+    updateSelectionUI();
+  }
+
+  function updateSelectionUI() {
+    const count = state.selected.size;
+    $("#selected-count").textContent = String(count);
+    $("#selected-pill").hidden = count === 0;
+    $("#selected-pill").textContent = "已选 " + count;
+    $("#download-selected-btn").disabled = count === 0;
+    $("#select-all-btn").disabled = state.songs.length === 0;
+    const all = state.songs.length > 0 && count === state.songs.length;
+    $("#select-all-btn").textContent = all ? "取消全选" : "全选";
+  }
+
+  function selectedSongs() {
+    return state.songs.filter((s) => state.selected.has(s.songmid));
+  }
+
+  async function enqueue(songs) {
+    if (!songs || !songs.length) {
+      toast("先勾选歌曲，或点某一行的下载按钮", "warn");
+      return;
+    }
+    const payload = {
+      songs: songs.map((s) => ({
+        mid: s.songmid,
+        name: s.name,
+        artist: s.artist || (s.artists || []).join("/") || "",
+      })),
+      quality: state.quality,
+      preview: state.preview,
+      no_preview: !state.fallback,
+      mirror: state.mirror,
+      verify: state.verify,
+    };
+    try {
+      const data = await api("/api/jobs", { method: "POST", body: JSON.stringify(payload) });
+      toast("已加入队列：" + data.ids.length + " 首（" + qualityLabel(state.quality) + "）", "ok");
+      state.selected.clear();
+      renderResults();
+      await fetchJobs();
+    } catch (e) {
+      toast("加入队列失败: " + e.message, "err", 8000);
+    }
+  }
+
+  function qualityLabel(q) {
+    return q === "flac" ? "FLAC 无损" : q === "128" ? "128k MP3" : "320k MP3";
+  }
+
+  // ---------------- jobs ----------------
+
+  const STATUS_TEXT = {
+    queued: "等待中",
+    resolving: "解析中",
+    downloading: "下载中",
+    verifying: "校验中",
+    done: "完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+
+  function isActive(status) {
+    return ["queued", "resolving", "downloading", "verifying"].includes(status);
+  }
+
+  function createJobCard(job) {
+    const card = el("article", "job");
+    card.dataset.id = String(job.id);
+
+    const top = el("div", "job-top");
+    const title = el("div", "job-title");
+    const name = el("span", "job-name");
+    const artist = el("span", "job-artist");
+    title.append(name, artist);
+    const chip = el("span", "status-chip");
+    top.append(title, chip);
+
+    const meta = el("div", "job-meta");
+    const q = el("span", "job-q");
+    const source = el("span", "job-source");
+    meta.append(q, source);
+
+    const bar = el("div", "bar");
+    const fill = el("div", "bar-fill");
+    bar.appendChild(fill);
+
+    const foot = el("div", "job-foot");
+    const stage = el("span", "job-stage");
+    const numbers = el("span", "job-numbers");
+    foot.append(stage, numbers);
+
+    const actions = el("div", "job-actions");
+    const actionSpecs = [
+      ["cancel", "取消", "danger"],
+      ["play", "播放", ""],
+      ["save", "保存", ""],
+      ["folder", "目录", ""],
+      ["retry", "重试", ""],
+    ];
+    actionSpecs.forEach(([action, label, klass]) => {
+      const btn = el("button", "btn small " + (klass || ""), label);
+      btn.type = "button";
+      btn.dataset.action = action;
+      actions.appendChild(btn);
+    });
+
+    const details = document.createElement("details");
+    details.className = "job-log";
+    const summary = document.createElement("summary");
+    summary.textContent = "过程日志";
+    const pre = document.createElement("pre");
+    details.append(summary, pre);
+
+    card.append(top, meta, bar, foot, actions, details);
+    card._refs = { name, artist, chip, q, source, bar, fill, stage, numbers, pre, actions, details };
+
+    card.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const current = state.jobs.get(Number(card.dataset.id));
+      if (!current) return;
+      const action = btn.dataset.action;
+      if (action === "cancel") cancelJob(current);
+      else if (action === "play") playJob(current);
+      else if (action === "save") saveJob(current);
+      else if (action === "folder") openJobDir(current);
+      else if (action === "retry") retryJob(current);
+    });
+    return card;
+  }
+
+  function updateJobCard(card, job) {
+    const r = card._refs;
+    r.name.textContent = job.name || job.mid;
+    r.name.title = job.name || job.mid;
+    r.artist.textContent = job.artist || "";
+    r.artist.title = job.artist || "";
+    r.chip.textContent = STATUS_TEXT[job.status] || job.status;
+    r.chip.className = "status-chip " + job.status;
+    r.q.textContent = (job.quality_label || job.quality || "") +
+      (job.preview ? " · 60s试听" : "");
+    r.q.classList.toggle("preview", !!job.preview);
+    r.source.textContent = job.source || "";
+    r.source.title = job.source || "";
+
+    const active = isActive(job.status);
+    const inFlight = ["resolving", "downloading", "verifying"].includes(job.status);
+    const ratio = job.total > 0 ? Math.min(1, job.downloaded / job.total) : (job.status === "done" ? 1 : 0);
+    r.fill.style.width = (ratio * 100).toFixed(1) + "%";
+    r.bar.classList.toggle("indeterminate", inFlight && !(job.total > 0));
+    r.fill.classList.toggle("done", job.status === "done");
+    r.fill.classList.toggle("error", job.status === "failed");
+
+    const stageText = job.error ? String(job.error).split("\n")[0] : (job.stage || STATUS_TEXT[job.status] || "");
+    r.stage.textContent = stageText;
+    r.stage.title = job.error || job.stage || "";
+    r.numbers.textContent = jobNumbers(job);
+
+    toggleAction(card, "cancel", ["queued", "resolving", "downloading"].includes(job.status));
+    toggleAction(card, "play", job.status === "done" && !!job.path);
+    toggleAction(card, "save", job.status === "done" && !!job.path);
+    toggleAction(card, "folder", !!job.path);
+    toggleAction(card, "retry", job.status === "failed" || job.status === "cancelled");
+
+    r.pre.textContent = (job.messages && job.messages.length ? job.messages : ["（暂无日志）"]).join("\n");
+    card.classList.toggle("is-active", active);
+    card.classList.toggle("is-failed", job.status === "failed");
+    card.classList.toggle("is-done", job.status === "done");
+  }
+
+  function toggleAction(card, action, visible) {
+    const btn = $('button[data-action="' + action + '"]', card);
+    if (btn) btn.hidden = !visible;
+  }
+
+  function jobNumbers(job) {
+    const parts = [];
+    if (job.total > 0) {
+      const pct = Math.min(100, Math.round((job.downloaded / job.total) * 100));
+      if (isActive(job.status) || job.status === "done") {
+        parts.push(pct + "%");
+        parts.push(fmtBytes(job.downloaded) + " / " + fmtBytes(job.total));
+      }
+    } else if (job.downloaded > 0) {
+      parts.push(fmtBytes(job.downloaded));
+    }
+    const speed = fmtSpeed(job.speed);
+    if (speed && isActive(job.status)) parts.push(speed);
+    if (job.elapsed && job.status !== "queued") parts.push("用时 " + fmtElapsed(job.elapsed));
+    if (job.verified) parts.push(job.verified.toFixed(1) + "s ✓");
+    return parts.join(" · ");
+  }
+
+  async function fetchJobs() {
+    if (state.jobsFetching) return;
+    state.jobsFetching = true;
+    try {
+      const data = await api("/api/jobs", { timeout: 12000 });
+      hideOffline();
+      const previous = new Map(state.jobs);
+      const jobs = (data.jobs || []).slice().sort((a, b) => b.id - a.id);
+
+      for (const job of jobs) {
+        const old = previous.get(job.id);
+        if (old && old.status !== job.status) {
+          if (job.status === "done") {
+            const skipped = (job.messages || []).some((m) => m.startsWith("已存在，跳过"));
+            toast(
+              (skipped ? "文件已存在，未重新下载：" : "下载完成：") + job.name,
+              skipped ? "info" : "ok"
+            );
+          }
+          else if (job.status === "failed") toast("下载失败：" + job.name + " — " + firstLine(job.error || job.stage), "err", 8000);
+        }
+      }
+
+      state.jobs.clear();
+      for (const job of jobs) state.jobs.set(job.id, job);
+
+      const desired = [];
+      for (const job of jobs) {
+        let card = state.jobEls.get(job.id);
+        if (!card) {
+          card = createJobCard(job);
+          state.jobEls.set(job.id, card);
+        }
+        updateJobCard(card, job);
+        desired.push(card);
+      }
+
+      for (const [id, card] of Array.from(state.jobEls.entries())) {
+        if (!state.jobs.has(id)) {
+          card.remove();
+          state.jobEls.delete(id);
+        }
+      }
+
+      const container = $("#jobs");
+      let orderChanged = desired.length !== container.children.length;
+      if (!orderChanged) {
+        for (let i = 0; i < desired.length; i++) {
+          if (container.children[i] !== desired[i]) { orderChanged = true; break; }
+        }
+      }
+      if (orderChanged) container.replaceChildren(...desired);
+      $("#jobs-empty").hidden = jobs.length > 0;
+
+      const active = jobs.filter((j) => isActive(j.status)).length;
+      $("#queue-summary").textContent = jobs.length
+        ? (active ? active + " 进行中 · " + jobs.length + " 个任务" : jobs.length + " 个任务")
+        : "暂无任务";
+      $("#clear-btn").disabled = !jobs.some((j) => ["done", "failed", "cancelled"].includes(j.status));
+    } catch (e) {
+      showOffline();
+    } finally {
+      state.jobsFetching = false;
+    }
+  }
+
+  function firstLine(s) {
+    return String(s || "").split("\n")[0];
+  }
+
+  async function cancelJob(job) {
+    try {
+      const data = await api("/api/jobs/" + job.id + "/cancel", { method: "POST", body: "{}" });
+      toast(data.cancelled ? "已请求取消：" + job.name : "任务已经结束", data.cancelled ? "info" : "warn");
+      fetchJobs();
+    } catch (e) {
+      toast("取消失败: " + e.message, "err");
+    }
+  }
+
+  function playJob(job) {
+    if (!job.path) {
+      toast("任务还没有生成文件", "warn");
+      return;
+    }
+    const audio = $("#audio");
+    audio.src = "/api/jobs/" + job.id + "/file";
+    $("#player-title").textContent = job.name || job.mid;
+    $("#player-sub").textContent = [job.artist, job.quality_label || job.quality].filter(Boolean).join(" · ");
+    $("#player").hidden = false;
+    document.body.classList.add("player-open");
+    audio.play().catch(() => {});
+  }
+
+  function saveJob(job) {
+    const a = document.createElement("a");
+    a.href = "/api/jobs/" + job.id + "/file?download=1";
+    a.download = job.file_name || "";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function openJobDir(job) {
+    try {
+      const data = await api("/api/jobs/" + job.id + "/open", { method: "POST", body: "{}" });
+      toast("已打开目录：" + data.path, "ok");
+    } catch (e) {
+      toast("打开目录失败: " + e.message, "err");
+    }
+  }
+
+  async function retryJob(job) {
+    const payload = {
+      songs: [{ mid: job.mid, name: job.name, artist: job.artist }],
+      quality: job.requested_quality || state.quality,
+      // 用入队时用户请求的模式，而不是 Resolved 后的实际结果：
+      // 回落试听产生的 preview=true 不应让重试变成「仅试听」。
+      preview: job.requested_preview === true,
+      no_preview: !state.fallback,
+      mirror: state.mirror,
+      verify: state.verify,
+    };
+    try {
+      await api("/api/jobs", { method: "POST", body: JSON.stringify(payload) });
+      toast("已重新加入队列：" + job.name, "ok");
+      fetchJobs();
+    } catch (e) {
+      toast("重试失败: " + e.message, "err");
+    }
+  }
+
+  async function clearFinished() {
+    try {
+      const data = await api("/api/jobs/clear", { method: "POST", body: "{}" });
+      toast(data.removed ? "已清理 " + data.removed + " 个任务" : "没有可清理的任务", "info");
+      fetchJobs();
+    } catch (e) {
+      toast("清理失败: " + e.message, "err");
+    }
+  }
+
+  // ---------------- login ----------------
+
+  function openModal(modal) {
+    state.lastFocus = document.activeElement;
+    modal.hidden = false;
+    document.body.classList.add("modal-open");
+    const focusable = modal.querySelector("button, input, [tabindex]");
+    if (focusable) setTimeout(() => focusable.focus(), 30);
+  }
+
+  function closeModal(modal) {
+    modal.hidden = true;
+    if (!document.querySelector(".modal-backdrop:not([hidden])")) {
+      document.body.classList.remove("modal-open");
+    }
+    if (state.lastFocus && typeof state.lastFocus.focus === "function") {
+      state.lastFocus.focus();
+    }
+    if (modal.id === "login-modal") stopLoginPolling();
+  }
+
+  function openLogin() {
+    const modal = $("#login-modal");
+    openModal(modal);
+    $("#login-qr").hidden = true;
+    $("#login-qr-placeholder").hidden = false;
+    $("#login-qr-placeholder").textContent = "点击「开始登录」生成二维码";
+    setTimeout(() => {
+      const start = $("#login-start");
+      if (!start.hidden) start.focus();
+    }, 60);
+    // 若登录仍在后台进行（例如关闭弹窗后重新打开），继续轮询而不是停在旧状态。
+    pollLogin();
+  }
+
+  function setLoginTab(kind) {
+    state.loginKind = kind;
+    $$("#login-tabs .tab").forEach((tab) => {
+      tab.classList.toggle("active", tab.dataset.kind === kind);
+      tab.setAttribute("aria-selected", tab.dataset.kind === kind ? "true" : "false");
+      tab.disabled = state.loginRunning;
+    });
+  }
+
+  async function startLogin() {
+    if (state.health && state.health.login_available === false) {
+      toast(state.health.login_blocked_reason || "当前配置下登录不会生效", "warn", 7000);
+      return;
+    }
+    try {
+      await api("/api/login/start", {
+        method: "POST",
+        body: JSON.stringify({ kind: state.loginKind }),
+        timeout: 20000,
+      });
+      state.loginQrUrl = "";
+      $("#login-qr").hidden = true;
+      $("#login-qr-placeholder").hidden = false;
+      $("#login-qr-placeholder").textContent = "二维码生成中…";
+      $("#login-log").textContent = "正在启动登录子进程…";
+      $("#login-status").className = "status-line";
+      $("#login-status").textContent = "正在申请二维码…";
+      pollLogin();
+    } catch (e) {
+      toast("启动登录失败: " + e.message, "err", 8000);
+      $("#login-status").className = "status-line err";
+      $("#login-status").textContent = e.message;
+    }
+  }
+
+  function stopLoginPolling() {
+    if (state.loginTimer) {
+      clearTimeout(state.loginTimer);
+      state.loginTimer = null;
+    }
+  }
+
+  async function pollLoginOnce() {
+    try {
+      const st = await api("/api/login/status", { timeout: 12000 });
+      renderLogin(st);
+      return st;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function pollLogin() {
+    stopLoginPolling();
+    const modal = $("#login-modal");
+    if (modal.hidden) return;
+    const st = await pollLoginOnce();
+    if (!st) {
+      state.loginTimer = setTimeout(pollLogin, 1500);
+      return;
+    }
+    if (st.running) {
+      state.loginTimer = setTimeout(pollLogin, 1100);
+    } else {
+      state.loginRunning = false;
+      if (st.success) {
+        refreshHealth();
+      }
+    }
+  }
+
+  function renderLogin(st) {
+    state.loginRunning = !!st.running;
+    if (st.kind) setLoginTab(st.kind);
+    $$("#login-tabs .tab").forEach((tab) => { tab.disabled = !!st.running; });
+
+    const status = $("#login-status");
+    status.className = "status-line";
+    if (st.running) {
+      status.textContent = "等待扫码…（二维码约 15 分钟有效）";
+    } else if (st.success) {
+      if (st.error) {
+        status.classList.add("err");
+        status.textContent = "登录成功，但 " + st.error;
+      } else {
+        status.classList.add("ok");
+        status.textContent = "✓ 登录成功，Cookie 已写入本机";
+      }
+    } else if (st.canceled) {
+      status.textContent = "登录已取消";
+    } else if (st.error) {
+      status.classList.add("err");
+      status.textContent = "登录失败：" + st.error;
+    } else {
+      status.textContent = "未开始";
+    }
+
+    const img = $("#login-qr");
+    const placeholder = $("#login-qr-placeholder");
+    if (st.qr && st.qr.url) {
+      if (state.loginQrUrl !== st.qr.url) {
+        state.loginQrUrl = st.qr.url;
+        img.src = st.qr.url;
+      }
+      img.hidden = false;
+      placeholder.hidden = true;
+    } else {
+      img.hidden = true;
+      placeholder.hidden = false;
+      placeholder.textContent = st.running ? "二维码生成中…" : "点击「开始登录」生成二维码";
+    }
+
+    $("#login-log").textContent = (st.lines && st.lines.length ? st.lines : ["等待开始…"]).join("\n");
+    $("#login-log").scrollTop = $("#login-log").scrollHeight;
+    $("#login-start").hidden = !!st.running;
+    $("#login-start").textContent = st.success ? "重新登录" : "开始登录";
+    $("#login-cancel").hidden = !st.running;
+  }
+
+  async function cancelLogin() {
+    try {
+      await api("/api/login/cancel", { method: "POST", body: "{}" });
+      toast("已取消登录", "info");
+      setTimeout(pollLogin, 300);
+    } catch (e) {
+      toast("取消失败: " + e.message, "err");
+    }
+  }
+
+  // ---------------- modal / events ----------------
+
+  function bindModals() {
+    $("#login-btn").addEventListener("click", openLogin);
+    $("#help-btn").addEventListener("click", () => openModal($("#help-modal")));
+    $("#footer-help").addEventListener("click", (e) => {
+      e.preventDefault();
+      openModal($("#help-modal"));
+    });
+
+    $$("[data-close-login]").forEach((btn) => btn.addEventListener("click", () => closeModal($("#login-modal"))));
+    $$("[data-close-help]").forEach((btn) => btn.addEventListener("click", () => closeModal($("#help-modal"))));
+
+    $$(".modal-backdrop").forEach((backdrop) => {
+      backdrop.addEventListener("click", (e) => {
+        if (e.target === backdrop) closeModal(backdrop);
+      });
+    });
+
+    $$("#login-tabs .tab").forEach((tab) => {
+      tab.addEventListener("click", () => setLoginTab(tab.dataset.kind));
+    });
+    $("#login-start").addEventListener("click", startLogin);
+    $("#login-cancel").addEventListener("click", cancelLogin);
+    $("#login-qr").addEventListener("error", () => {
+      // 二维码文件可能还在写入；清掉 URL 让下一次轮询重新加载。
+      state.loginQrUrl = "";
+    });
+
+    $("#player-close").addEventListener("click", () => {
+      const audio = $("#audio");
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      $("#player").hidden = true;
+      document.body.classList.remove("player-open");
+    });
+    $("#audio").addEventListener("error", () => {
+      toast("播放失败：文件可能已被移动、清理，或尚未下载完成", "err", 7000);
+    });
+  }
+
+  function bindPage() {
+    $("#search-btn").addEventListener("click", doSearch);
+    $("#search-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        doSearch();
+      }
+    });
+    $("#select-all-btn").addEventListener("click", () => {
+      if (state.selected.size === state.songs.length) state.selected.clear();
+      else state.selected = new Set(state.songs.map((s) => s.songmid));
+      state.rowEls.forEach((row, mid) => {
+        const on = state.selected.has(mid);
+        row.classList.toggle("selected", on);
+        const box = $("input[type=checkbox]", row);
+        if (box) box.checked = on;
+      });
+      updateSelectionUI();
+    });
+    $("#download-selected-btn").addEventListener("click", () => {
+      enqueue(selectedSongs());
+    });
+    $("#clear-btn").addEventListener("click", clearFinished);
+    $("#refresh-btn").addEventListener("click", async () => {
+      await refreshHealth();
+      toast("登录态已刷新", "ok");
+    });
+
+    document.addEventListener("keydown", (e) => {
+      const active = document.activeElement;
+      const typing = active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName);
+      if (e.key === "Escape") {
+        const modal = document.querySelector(".modal-backdrop:not([hidden])");
+        if (modal) {
+          e.preventDefault();
+          closeModal(modal);
+        }
+        return;
+      }
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        $("#search-input").focus();
+        return;
+      }
+      if (e.key === "?" && !typing) {
+        e.preventDefault();
+        openModal($("#help-modal"));
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        enqueue(selectedSongs());
+      }
+    });
+
+    window.addEventListener("online", () => { refreshHealth(); fetchJobs(); });
+    window.addEventListener("offline", showOffline);
+  }
+
+  function startPolling() {
+    refreshHealth();
+    fetchJobs();
+    setInterval(() => {
+      if (document.visibilityState === "visible") fetchJobs();
+    }, 1000);
+    setInterval(() => {
+      if (document.visibilityState === "visible") refreshHealth();
+    }, 20000);
+  }
+
+  function init() {
+    applyPrefs();
+    bindOptions();
+    bindModals();
+    bindPage();
+    startPolling();
+    // 支持用 /?q=关键词 直接打开一次搜索（便于收藏/分享本地链接）。
+    const initial = new URLSearchParams(location.search).get("q");
+    if (initial) {
+      $("#search-input").value = initial;
+      doSearch();
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>

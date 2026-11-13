@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::USER_AGENT;
 use crate::auth::{self, Auth};
@@ -29,6 +29,17 @@ pub enum LoginKind {
     /// QQ音乐 App 扫码（也可直接用手机 QQ / 微信扫同一个码）
     #[value(name = "qqmusic", alias = "app", alias = "mobile", alias = "client")]
     QqMusic,
+}
+
+impl LoginKind {
+    /// 与二维码缓存文件名 `qr-<slug>.png|jpg` 一致。
+    pub fn slug(self) -> &'static str {
+        match self {
+            LoginKind::Qq => "qq",
+            LoginKind::Wx => "wx",
+            LoginKind::QqMusic => "qqmusic",
+        }
+    }
 }
 
 pub struct LoginOpts {
@@ -62,11 +73,17 @@ pub fn login(kind: LoginKind, opts: &LoginOpts) -> Result<Auth> {
             }
         ))
     );
-    println!("  {} {}", crate::ui::label("账号 uin"), crate::ui::id(&mask_uin(&auth.uin)));
+    println!(
+        "  {} {}",
+        crate::ui::label("账号 uin"),
+        crate::ui::id(&mask_uin(&auth.uin))
+    );
     println!("  {} {}", crate::ui::label("Cookie 已写入"), path.display());
     println!(
         "  {}",
-        crate::ui::dim("会员权益（320k / FLAC）是否可用取决于账号本身，可先用 `qqmusic-dl auth` 查看状态。")
+        crate::ui::dim(
+            "会员权益（320k / FLAC）是否可用取决于账号本身，可先用 `qqmusic-dl auth` 查看状态。"
+        )
     );
     Ok(auth)
 }
@@ -152,7 +169,10 @@ fn qq_poll(http: &CurlJar, qrsig: &str) -> Result<(u8, String)> {
     );
     let resp = http.get(
         &url,
-        &[("Referer", PT_REFERER), ("Cookie", &format!("qrsig={qrsig}"))],
+        &[
+            ("Referer", PT_REFERER),
+            ("Cookie", &format!("qrsig={qrsig}")),
+        ],
     )?;
     let text = resp.text();
     if std::env::var_os("QQMUSIC_DEBUG").is_some() {
@@ -234,7 +254,12 @@ fn qq_exchange(http: &CurlJar, cb_url: &str) -> Result<(Auth, String)> {
                 .map(|s| s.split('&').next().unwrap_or("").to_string())
         })
         .filter(|c| !c.is_empty())
-        .with_context(|| format!("graph 未返回 code（HTTP {}, Location: {location}）", auth.status))?;
+        .with_context(|| {
+            format!(
+                "graph 未返回 code（HTTP {}, Location: {location}）",
+                auth.status
+            )
+        })?;
 
     // 3) code 换 QQ 音乐票据（跟 wx_redirect.html 里的官方调用完全一致）
     let body = exchange_body(
@@ -290,9 +315,7 @@ fn wx_login(http: &CurlJar, opts: &LoginOpts) -> Result<(Auth, String)> {
         std::thread::sleep(Duration::from_secs(2));
         let stamp = now_ms().to_string();
         let resp = http.get(
-            &format!(
-                "https://long.open.weixin.qq.com/connect/l/qrconnect?uuid={uuid}&_={stamp}"
-            ),
+            &format!("https://long.open.weixin.qq.com/connect/l/qrconnect?uuid={uuid}&_={stamp}"),
             &[("Referer", "https://open.weixin.qq.com/")],
         )?;
         let text = resp.text();
@@ -456,11 +479,7 @@ fn parse_login_response(resp: &HttpOut) -> Result<(Option<String>, Value)> {
     Ok((nick, data))
 }
 
-fn build_auth(
-    jar: &BTreeMap<String, String>,
-    data: Option<&Value>,
-    source: &str,
-) -> Result<Auth> {
+fn build_auth(jar: &BTreeMap<String, String>, data: Option<&Value>, source: &str) -> Result<Auth> {
     let mut pairs: BTreeMap<String, String> = BTreeMap::new();
     const KEEP: [&str; 10] = [
         "qm_keyst",
@@ -532,15 +551,31 @@ fn build_auth(
 
 fn write_cookie(cookie: &str) -> Result<PathBuf> {
     let path = auth::default_cookie_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    // 原子写入：登录流程可能被 SIGTERM/取消打断，直接 fs::write 会留下
+    // 半截 Cookie 并覆盖原有登录态。先写同目录临时文件，再 rename。
+    let tmp = dir.join(format!(".cookie-{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        std::fs::write(&tmp, cookie)
+            .with_context(|| format!("写入 Cookie 临时文件失败: {}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("替换 Cookie 文件失败: {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::write(&path, cookie).with_context(|| format!("写入 Cookie 失败: {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    result?;
     Ok(path)
 }
 
@@ -557,12 +592,16 @@ struct CurlJar {
 
 impl CurlJar {
     fn new(proxy: Option<&str>, insecure: bool) -> Result<Self> {
+        cleanup_stale_login_dirs();
         let dir = std::env::temp_dir().join(format!(
             "qqmusic-dl-login-{}-{}",
             std::process::id(),
             now_ms()
         ));
-        std::fs::create_dir_all(&dir).with_context(|| format!("创建临时目录失败: {}", dir.display()))?;
+        // 用 create_dir 而不是 create_dir_all：目录若已被别人预建（例如
+        // /tmp 里的同名符号链接），直接失败，避免把 Cookie 罐写进他人目录。
+        std::fs::create_dir(&dir)
+            .with_context(|| format!("创建临时目录失败: {}", dir.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -677,6 +716,43 @@ impl CurlJar {
     }
 }
 
+/// 清理某个登录子进程的临时 Cookie 罐（Web 取消登录后调用）。
+/// 目录名包含子进程 PID，正常/异常退出都可以安全删除。
+pub fn cleanup_login_dirs_for_pid(pid: u32) {
+    let prefix = format!("qqmusic-dl-login-{pid}-");
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// 登录进程被 SIGTERM/SIGKILL 时 Drop 不会执行，临时 Cookie 罐会留在
+/// /tmp/qqmusic-dl-login-*（目录 0700）。下次登录时顺手清掉一小时前的残留。
+fn cleanup_stale_login_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(3600)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("qqmusic-dl-login-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() && meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 impl Drop for CurlJar {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
@@ -723,7 +799,11 @@ fn show_qr(
     let _ = std::fs::write(&path, bytes);
 
     println!();
-    println!("  {} {}", crate::ui::bold("扫码登录"), crate::ui::id(channel));
+    println!(
+        "  {} {}",
+        crate::ui::bold("扫码登录"),
+        crate::ui::id(channel)
+    );
     match render_qr(bytes) {
         Ok(art) => print!("{art}"),
         Err(e) => println!("  （终端渲染失败：{e}）"),
@@ -777,6 +857,49 @@ fn qr_path(kind: &str, ext: &str) -> PathBuf {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
         });
     base.join("qqmusic-dl").join(format!("qr-{kind}.{ext}"))
+}
+
+/// 取最近一次登录流程写下的二维码图片（WebUI 轮询展示用）。
+/// 返回 `(字节, MIME, 修改时间毫秒)`；没有二维码时返回 None。
+pub fn qr_image(kind: LoginKind) -> Option<(Vec<u8>, &'static str, u128)> {
+    for ext in ["png", "jpg"] {
+        let path = qr_path(kind.slug(), ext);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.len() == 0 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        // 登录子进程可能正在写文件；只返回完整图片魔数，避免 WebUI 拿到半张图。
+        let looks_like_image =
+            bytes.starts_with(&[0x89, b'P', b'N', b'G']) || bytes.starts_with(&[0xFF, 0xD8]);
+        if !looks_like_image {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        return Some((bytes, mime, mtime));
+    }
+    None
+}
+
+/// 开始新一轮登录前清掉旧二维码，避免 WebUI 先展示上一轮的码。
+pub fn clear_qr(kind: LoginKind) {
+    for ext in ["png", "jpg"] {
+        let _ = std::fs::remove_file(qr_path(kind.slug(), ext));
+    }
 }
 
 /// 把二维码图片解码成文本，再用半块字符重新画到终端（行高按 2:1 折算，保证扫得动）。

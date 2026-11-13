@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::api::{Quality, Song, USER_AGENT};
+use crate::download::Cancelled;
 
 const MIGU_SEARCH: &str = "https://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/search_all.do";
 const MIGU_LISTEN: &str = "https://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/sub/listen.do";
@@ -34,8 +36,21 @@ pub struct Resolved {
     pub expected_size: Option<u64>,
 }
 
+/// 允许的镜像策略（TUI / WebUI 的选项循环也用它）。
+pub const POLICIES: [&str; 5] = ["auto", "migu", "kuwo", "netease", "off"];
+
 /// 依次尝试匿名镜像源，返回可直接下载的整曲地址。
-pub fn resolve(client: &Client, song: &Song, policy: &str) -> Result<Resolved> {
+/// 命中/改试候选等过程通过 `log` 上报，让 TUI / WebUI 不必依赖 stdout。
+pub fn resolve_with<F>(
+    client: &Client,
+    song: &Song,
+    policy: &str,
+    cancel: &AtomicBool,
+    mut log: F,
+) -> Result<Resolved>
+where
+    F: FnMut(&str),
+{
     let providers: Vec<&str> = match policy {
         "auto" => PROVIDERS.to_vec(),
         "off" => bail!("已禁用匿名镜像"),
@@ -45,11 +60,23 @@ pub fn resolve(client: &Client, song: &Song, policy: &str) -> Result<Resolved> {
 
     let mut errors = Vec::new();
     for name in providers {
-        match try_provider(client, name, song) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
+        match try_provider(client, name, song, cancel, &mut log) {
             Ok(Some(r)) => return Ok(r),
             Ok(None) => errors.push(format!("{name}: 曲库中无匹配曲目")),
-            Err(e) => errors.push(format!("{name}: {e}")),
+            Err(e) => {
+                // 取消不是镜像失败，必须原样往上传，否则 UI 会显示 failed。
+                if e.downcast_ref::<Cancelled>().is_some() {
+                    return Err(e);
+                }
+                errors.push(format!("{name}: {e}"));
+            }
         }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Cancelled.into());
     }
     bail!("匿名镜像未命中 —— {}", errors.join("；"))
 }
@@ -58,13 +85,25 @@ pub fn resolve(client: &Client, song: &Song, policy: &str) -> Result<Resolved> {
 /// 后面的同名普通版本反而能匿名播放，所以不能只试“最高分”那一个。
 const MAX_CANDIDATE_TRIES: usize = 5;
 
-fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resolved>> {
+fn try_provider<F>(
+    client: &Client,
+    name: &str,
+    song: &Song,
+    cancel: &AtomicBool,
+    log: &mut F,
+) -> Result<Option<Resolved>>
+where
+    F: FnMut(&str),
+{
     let queries = search_queries(song);
     let debug = std::env::var_os("QQMUSIC_DEBUG").is_some();
     let mut scored: Vec<(i32, Candidate)> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
     for q in &queries {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
         let cands = match name {
             "migu" => search_migu(client, q)?,
             "kuwo" => search_kuwo(client, q)?,
@@ -98,6 +137,9 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
     let mut last_err: Option<anyhow::Error> = None;
     let mut attempts = 0usize;
     for (sc, cand) in scored {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
         if !seen_ids.insert(cand.id.clone()) {
             continue;
         }
@@ -109,15 +151,15 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
         }
         attempts += 1;
         if attempts == 1 {
-            println!(
-                "  镜像命中: {} - {}（{}，score {}）",
+            log(&format!(
+                "镜像命中: {} - {}（{}，score {}）",
                 cand.artist, cand.title, cand.provider, sc
-            );
+            ));
         } else {
-            println!(
-                "  改试候选: {} - {}（{}，score {}）",
+            log(&format!(
+                "改试候选: {} - {}（{}，score {}）",
                 cand.artist, cand.title, cand.provider, sc
-            );
+            ));
         }
         let result = match cand.provider {
             "migu" => resolve_migu(client, &cand),
@@ -128,6 +170,9 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
         match result {
             Ok(r) => return Ok(Some(r)),
             Err(e) => {
+                if e.downcast_ref::<Cancelled>().is_some() {
+                    return Err(e);
+                }
                 if debug {
                     eprintln!("    该候选不可用: {e:#}");
                 }
@@ -136,6 +181,9 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
         }
     }
 
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Cancelled.into());
+    }
     match last_err {
         Some(e) => Err(e),
         None => Ok(None),
@@ -144,8 +192,25 @@ fn try_provider(client: &Client, name: &str, song: &Song) -> Result<Option<Resol
 
 /// 会改变作品本体的版本标记：命中且原曲没有 → 直接淘汰。
 const VERSION_MARKERS: [&str; 20] = [
-    "live", "伴奏", "ktv", "dj", "remix", "翻唱", "cover", "纯音乐", "铃声", "女声版",
-    "童声", "片段", "慢摇", "广场舞", "钢琴版", "吉他版", "八音盒", "纯享", "现场",
+    "live",
+    "伴奏",
+    "ktv",
+    "dj",
+    "remix",
+    "翻唱",
+    "cover",
+    "纯音乐",
+    "铃声",
+    "女声版",
+    "童声",
+    "片段",
+    "慢摇",
+    "广场舞",
+    "钢琴版",
+    "吉他版",
+    "八音盒",
+    "纯享",
+    "现场",
     "演唱会",
 ];
 
@@ -163,7 +228,8 @@ fn search_queries(song: &Song) -> Vec<String> {
 
 fn search_migu(client: &Client, q: &str) -> Result<Vec<Candidate>> {
     let v = get_json(
-        client.get(MIGU_SEARCH)
+        client
+            .get(MIGU_SEARCH)
             .query(&[
                 ("text", q),
                 ("pageNo", "1"),
@@ -282,7 +348,11 @@ fn search_kuwo(client: &Client, q: &str) -> Result<Vec<Candidate>> {
         Ok(v) => v,
         Err(_) => return Ok(Vec::new()),
     };
-    let arr = v.get("abslist").and_then(Value::as_array).cloned().unwrap_or_default();
+    let arr = v
+        .get("abslist")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut out = Vec::new();
     for it in arr {
         let rid = str_of(&it, &["DC_TARGETID", "MUSICRID"]);
@@ -356,7 +426,11 @@ fn search_netease(client: &Client, q: &str) -> Result<Vec<Candidate>> {
         if fee != 0 && fee != 8 {
             continue;
         }
-        let id = it.get("id").and_then(Value::as_i64).map(|x| x.to_string()).unwrap_or_default();
+        let id = it
+            .get("id")
+            .and_then(Value::as_i64)
+            .map(|x| x.to_string())
+            .unwrap_or_default();
         let title = str_of(&it, &["name"]);
         if id.is_empty() || title.is_empty() {
             continue;

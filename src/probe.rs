@@ -133,8 +133,12 @@ fn parse_frame_header(h: &[u8; 4]) -> Option<(usize, u32, u32)> {
     if br_idx == 0 || br_idx == 15 || sr_idx == 3 {
         return None;
     }
-    const BR_V1: [u32; 16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-    const BR_V2: [u32; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+    const BR_V1: [u32; 16] = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+    ];
+    const BR_V2: [u32; 16] = [
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+    ];
     const SR: [u32; 3] = [44100, 48000, 32000];
 
     let (bitrate, sample_rate, samples_per_frame) = match version {
@@ -159,11 +163,19 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn be_u32(buf: &[u8], at: usize) -> Result<u32> {
-    let b: [u8; 4] = buf.get(at..at + 4).context("mp4 字段截断")?.try_into().unwrap();
+    let b: [u8; 4] = buf
+        .get(at..at + 4)
+        .context("mp4 字段截断")?
+        .try_into()
+        .unwrap();
     Ok(u32::from_be_bytes(b))
 }
 
 fn be_u64(buf: &[u8], at: usize) -> Result<u64> {
-    let b: [u8; 8] = buf.get(at..at + 8).context("mp4 字段截断")?.try_into().unwrap();
+    let b: [u8; 8] = buf
+        .get(at..at + 8)
+        .context("mp4 字段截断")?
+        .try_into()
+        .unwrap();
     Ok(u64::from_be_bytes(b))
 }

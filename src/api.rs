@@ -7,7 +7,12 @@ use crate::auth::Auth;
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const SEARCH_URL: &str = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp";
+// client_search_cp 在部分网络/时段会直接 500；search_for_qq_cp 返回同样的
+// data.song.list 结构，作为首选，旧接口保留兜底。
+const SEARCH_URLS: [&str; 2] = [
+    "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp",
+    "https://c.y.qq.com/soso/fcgi-bin/client_search_cp",
+];
 const DETAIL_URL: &str = "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg";
 const MUSICU_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 
@@ -44,6 +49,34 @@ impl Quality {
             Quality::Mp3_128 => "128k MP3",
             Quality::Mp3_320 => "320k MP3",
             Quality::Flac => "FLAC 无损",
+        }
+    }
+
+    /// 命令行 / HTTP / 前端共用的短名称。
+    pub fn slug(self) -> &'static str {
+        match self {
+            Quality::Mp3_128 => "128",
+            Quality::Mp3_320 => "320",
+            Quality::Flac => "flac",
+        }
+    }
+
+    /// 宽松解析 `128` / `320` / `flac` / `m500` / `sq` 等写法。
+    pub fn from_str_loose(s: &str) -> Option<Quality> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "128" | "m500" | "mp3-128" | "low" => Some(Quality::Mp3_128),
+            "320" | "m800" | "mp3" | "high" => Some(Quality::Mp3_320),
+            "flac" | "lossless" | "sq" | "f000" => Some(Quality::Flac),
+            _ => None,
+        }
+    }
+
+    /// 在 TUI 里循环切换：128 → 320 → FLAC → 128。
+    pub fn cycle_next(self) -> Quality {
+        match self {
+            Quality::Mp3_128 => Quality::Mp3_320,
+            Quality::Mp3_320 => Quality::Flac,
+            Quality::Flac => Quality::Mp3_128,
         }
     }
 
@@ -87,6 +120,25 @@ impl Song {
     pub fn duration_str(&self) -> String {
         format!("{:02}:{:02}", self.duration / 60, self.duration % 60)
     }
+
+    /// 曲库里标注的可用音质，例如 `320k/128k/FLAC`。
+    pub fn quality_flags(&self) -> String {
+        let mut v = Vec::new();
+        if self.size_320 > 0 {
+            v.push("320k");
+        }
+        if self.size_128 > 0 {
+            v.push("128k");
+        }
+        if self.size_flac > 0 {
+            v.push("FLAC");
+        }
+        if v.is_empty() {
+            "-".to_string()
+        } else {
+            v.join("/")
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -100,9 +152,12 @@ pub struct StreamUrl {
 pub enum StreamLookup {
     Found(StreamUrl),
     /// 没有可用的 purl，附带服务端 result 码（0 表示未知情况）。
-    Unavailable { result: i64 },
+    Unavailable {
+        result: i64,
+    },
 }
 
+#[derive(Clone)]
 pub struct QqClient {
     http: reqwest::blocking::Client,
     auth: Auth,
@@ -113,10 +168,11 @@ impl QqClient {
     pub fn new(auth: Auth, proxy: Option<&str>, insecure: bool) -> Result<Self> {
         let mut builder = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(30));
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10));
         if let Some(p) = proxy {
-            builder = builder
-                .proxy(reqwest::Proxy::all(p).with_context(|| format!("无效代理: {p}"))?);
+            builder =
+                builder.proxy(reqwest::Proxy::all(p).with_context(|| format!("无效代理: {p}"))?);
         }
         if insecure {
             builder = builder.danger_accept_invalid_certs(true);
@@ -150,12 +206,32 @@ impl QqClient {
     /// 搜索歌曲。该接口匿名可用。
     pub fn search(&self, keyword: &str, limit: usize) -> Result<Vec<Song>> {
         let n = limit.clamp(1, 50).to_string();
+        let mut errors = Vec::new();
+        let mut saw_empty = false;
+        for url in SEARCH_URLS {
+            match self.search_at(url, keyword, &n) {
+                Ok(songs) if !songs.is_empty() => return Ok(songs),
+                Ok(_) => {
+                    saw_empty = true;
+                    errors.push(format!("{}: 无结果", short_url(url)));
+                }
+                Err(e) => errors.push(format!("{}: {e:#}", short_url(url))),
+            }
+        }
+        if saw_empty {
+            Ok(Vec::new())
+        } else {
+            bail!("搜索失败 —— {}", errors.join("；"))
+        }
+    }
+
+    fn search_at(&self, url: &str, keyword: &str, n: &str) -> Result<Vec<Song>> {
         let resp = self
             .http
-            .get(SEARCH_URL)
+            .get(url)
             .query(&[
                 ("p", "1"),
-                ("n", n.as_str()),
+                ("n", n),
                 ("w", keyword),
                 ("format", "json"),
                 ("cr", "1"),
@@ -172,7 +248,7 @@ impl QqClient {
         let list = v
             .pointer("/data/song/list")
             .and_then(Value::as_array)
-            .context("搜索结果为空或接口格式已变化")?;
+            .context("响应缺少 data.song.list")?;
         Ok(list.iter().filter_map(parse_song).collect())
     }
 
@@ -216,10 +292,7 @@ impl QqClient {
                 .and_then(Value::as_u64)
                 .unwrap_or(song.size_flac);
             if song.preview_size == 0 {
-                song.preview_size = file
-                    .get("size_try")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                song.preview_size = file.get("size_try").and_then(Value::as_u64).unwrap_or(0);
             }
         }
         Ok(song)
@@ -380,8 +453,64 @@ fn parse_song(v: &Value) -> Option<Song> {
     })
 }
 
+fn short_url(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
+}
+
 fn get_str(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|k| v.get(*k).and_then(Value::as_str))
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_song() -> Value {
+        json!({
+            "songmid": "003os5gx3zLAc5",
+            "songname": "茉莉花",
+            "singer": [{"mid": "001ncRdP3smBmz", "name": "贝乐虎儿歌"}],
+            "albumname": "童谣",
+            "interval": 130,
+            "size128": 2095043,
+            "size320": 5237260,
+            "sizeflac": 12871347,
+            "preview": {"trysize": 481070}
+        })
+    }
+
+    #[test]
+    fn parses_search_result_song() {
+        let song = parse_song(&sample_song()).expect("song");
+        assert_eq!(song.mid, "003os5gx3zLAc5");
+        // search_for_qq_cp 不返回 strMediaMid 时回落到 songmid；
+        // 下载前会再调 detail() 拿到真正的 media_mid。
+        assert_eq!(song.media_mid, song.mid);
+        assert_eq!(song.name, "茉莉花");
+        assert_eq!(song.artist_str(), "贝乐虎儿歌");
+        assert_eq!(song.duration_str(), "02:10");
+        assert_eq!(song.quality_flags(), "320k/128k/FLAC");
+        assert_eq!(song.preview_size, 481070);
+    }
+
+    #[test]
+    fn quality_cycle_and_loose_parsing() {
+        let mut q = Quality::Mp3_128;
+        q = q.cycle_next();
+        assert_eq!(q, Quality::Mp3_320);
+        q = q.cycle_next();
+        assert_eq!(q, Quality::Flac);
+        q = q.cycle_next();
+        assert_eq!(q, Quality::Mp3_128);
+        assert_eq!(Quality::from_str_loose("M800"), Some(Quality::Mp3_320));
+        assert_eq!(Quality::from_str_loose("sq"), Some(Quality::Flac));
+        assert_eq!(Quality::from_str_loose("nope"), None);
+    }
+
+    #[test]
+    fn endpoint_names_are_short() {
+        assert_eq!(short_url(SEARCH_URLS[0]), "search_for_qq_cp");
+    }
 }

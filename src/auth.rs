@@ -134,6 +134,33 @@ fn normalize_uin(v: &str) -> String {
     }
 }
 
+/// 原子写入 Cookie 文件（0600），供 --cookie-file 同步和登录流程使用。
+pub fn write_cookie_file(path: &Path, cookie: &str) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
+    let tmp = dir.join(format!(".cookie-{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        std::fs::write(&tmp, cookie)
+            .with_context(|| format!("写入 Cookie 临时文件失败: {}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("替换 Cookie 文件失败: {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// QQ 音乐 g_tk 算法（hash33）。
 fn hash33(s: &str) -> u64 {
     let mut h: u32 = 5381;

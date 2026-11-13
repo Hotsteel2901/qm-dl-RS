@@ -2,17 +2,23 @@ mod api;
 mod auth;
 mod bridge;
 mod download;
+mod flow;
 mod login;
 mod mirror;
 mod probe;
+mod tui;
 mod ui;
+mod util;
+mod web;
 
-use anyhow::{bail, Context, Result};
-use api::{QqClient, Quality, Song, StreamLookup, StreamUrl};
+use anyhow::{bail, Result};
+use api::{QqClient, Quality, Song};
 use auth::Auth;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use flow::FlowEvent;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Parser)]
@@ -28,6 +34,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
                   qqmusic-dl download 0039MnYb0qxYhV -q flac -o ~/Music\n  \
                   qqmusic-dl --anon get \"晴天 周杰伦\" -n 1\n  \
                   qqmusic-dl login qqmusic        # QQ音乐 App 扫码\n  \
+                  qqmusic-dl tui                  # 全屏终端界面\n  \
+                  qqmusic-dl web --open           # 本地 WebUI\n  \
                   qqmusic-dl serve -p 8080        # 会员票据桥\n  \
                   qqmusic-dl mint 000Jd2XU1i8Dpj -q 320 --json"
 )]
@@ -60,8 +68,9 @@ struct Cli {
     #[arg(long, global = true)]
     no_verify: bool,
 
+    /// 不指定子命令时：交互式终端进入 TUI，非交互环境打印帮助。
     #[command(subcommand)]
-    cmd: CliCommand,
+    cmd: Option<CliCommand>,
 }
 
 #[derive(Subcommand)]
@@ -127,6 +136,45 @@ enum CliCommand {
         bridge: Option<String>,
     },
 
+    /// 启动全屏终端界面：搜索、多选、下载队列与扫码登录
+    ///
+    /// 也支持直接运行 `qqmusic-dl`（无子命令）进入 TUI。
+    Tui {
+        /// 默认下载目录
+        #[arg(short = 'o', long, default_value = ".")]
+        out: PathBuf,
+        /// 默认音质
+        #[arg(short = 'q', long, default_value = "320")]
+        quality: Quality,
+        /// 从票据桥取直链（例如 http://A:8080），本地无需会员账号
+        #[arg(long)]
+        bridge: Option<String>,
+    },
+
+    /// 启动本地 WebUI：浏览器里搜索、批量下载、播放与扫码登录
+    ///
+    /// 前端完全内嵌在二进制里（单文件、无 CDN、无构建步骤）。
+    /// 默认只监听 127.0.0.1；供局域网使用时加 `--bind 0.0.0.0`。
+    Web {
+        #[arg(short = 'p', long, default_value_t = 8088)]
+        port: u16,
+        /// 监听地址（默认仅本机）
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// 默认下载目录
+        #[arg(short = 'o', long, default_value = ".")]
+        out: PathBuf,
+        /// 默认音质
+        #[arg(short = 'q', long, default_value = "320")]
+        quality: Quality,
+        /// 启动后自动用浏览器打开
+        #[arg(long)]
+        open: bool,
+        /// 从票据桥取直链（例如 http://A:8080），本地无需会员账号
+        #[arg(long)]
+        bridge: Option<String>,
+    },
+
     /// 用会员账号签发一条 vkey 直链（bearer token，2 小时内任何人可用）
     ///
     /// 直链本身不校验 Cookie / IP，可贴到任何下载器；请勿发到公开渠道。
@@ -176,13 +224,6 @@ struct Opts {
 }
 
 fn main() {
-    // 输出接到 `head` 等提前关闭的管道时，默认会因 EPIPE 触发 println! panic。
-    // 恢复系统默认的 SIGPIPE 行为，让进程安静退出（shell 看到 141）。
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
-
     if let Err(e) = run() {
         eprintln!("{} {e:#}", ui::err("错误:"));
         std::process::exit(1);
@@ -191,12 +232,40 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // 输出接到 `head` 等提前关闭的管道时，默认会因 EPIPE 触发 println! panic。
+    // CLI 恢复系统默认 SIGPIPE；TUI/Web 则必须忽略，否则浏览器断开或终端关闭
+    // 会让进程直接消失，来不及恢复终端/释放端口。
+    #[cfg(unix)]
+    unsafe {
+        let ui_mode = match cli.cmd.as_ref() {
+            Some(CliCommand::Tui { .. })
+            | Some(CliCommand::Web { .. })
+            // 票据桥是长驻 HTTP 服务，客户端断开时不能让 SIGPIPE 杀掉进程。
+            | Some(CliCommand::Serve { .. }) => true,
+            // 无子命令只有确实会进入 TUI 时才忽略 SIGPIPE；
+            // 非交互环境会改成打印帮助，保持 CLI 的 SIG_DFL 行为。
+            None => std::io::stdout().is_terminal() && std::io::stdin().is_terminal(),
+            _ => false,
+        };
+        libc::signal(
+            libc::SIGPIPE,
+            if ui_mode {
+                libc::SIG_IGN
+            } else {
+                libc::SIG_DFL
+            },
+        );
+    }
     let auth = if cli.anon {
         Auth::anonymous()
     } else {
         Auth::load(cli.cookie.as_deref(), cli.cookie_file.as_deref())?
     };
-    if !matches!(cli.mirror.as_str(), "auto" | "migu" | "kuwo" | "netease" | "off") {
+    if !matches!(
+        cli.mirror.as_str(),
+        "auto" | "migu" | "kuwo" | "netease" | "off"
+    ) {
         bail!(
             "未知镜像源: {}（可选 auto / migu / kuwo / netease / off）",
             cli.mirror
@@ -208,14 +277,41 @@ fn run() -> Result<()> {
         bridge: None,
     };
 
-    match cli.cmd {
+    let cmd = match cli.cmd {
+        Some(cmd) => cmd,
+        None => {
+            // 无子命令：交互式终端直接进 TUI；管道/脚本环境打印帮助，绝不悄无声息。
+            if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+                CliCommand::Tui {
+                    out: PathBuf::from("."),
+                    quality: Quality::Mp3_320,
+                    bridge: None,
+                }
+            } else {
+                let mut command = Cli::command();
+                command.print_help()?;
+                println!();
+                // 非交互环境没有子命令属于用法错误；保留 clap 的退出码 2，
+                // 便于脚本区分「没写命令」和「正常执行」。
+                std::process::exit(2);
+            }
+        }
+    };
+
+    match cmd {
         CliCommand::Auth => {
             print_auth(&auth);
-            println!("  {} {}", ui::label("默认 Cookie 文件"), auth::default_cookie_path().display());
+            println!(
+                "  {} {}",
+                ui::label("默认 Cookie 文件"),
+                auth::default_cookie_path().display()
+            );
             println!("  {} {}", ui::label("匿名镜像源"), cli.mirror);
             println!(
                 "  {}",
-                ui::dim("提示: 换账号可执行 login qq / login wx / login qqmusic；--anon 强制纯匿名。")
+                ui::dim(
+                    "提示: 换账号可执行 login qq / login wx / login qqmusic；--anon 强制纯匿名。"
+                )
             );
             Ok(())
         }
@@ -233,12 +329,52 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             if json {
-                print_json(&songs)?;
+                print_json(&songs, Some(&client))?;
             } else {
                 print_table(&songs);
             }
             Ok(())
         }
+
+        CliCommand::Tui {
+            out,
+            quality,
+            bridge,
+        } => tui::run(tui::Options {
+            out,
+            quality,
+            mirror: cli.mirror,
+            verify: !cli.no_verify,
+            bridge,
+            proxy: cli.proxy,
+            insecure: cli.insecure,
+            anon: cli.anon,
+            cookie: cli.cookie,
+            cookie_file: cli.cookie_file,
+        }),
+
+        CliCommand::Web {
+            port,
+            bind,
+            out,
+            quality,
+            open,
+            bridge,
+        } => web::serve(web::Options {
+            port,
+            bind,
+            out,
+            quality,
+            open,
+            bridge,
+            mirror: cli.mirror,
+            verify: !cli.no_verify,
+            proxy: cli.proxy,
+            insecure: cli.insecure,
+            anon: cli.anon,
+            cookie: cli.cookie,
+            cookie_file: cli.cookie_file,
+        }),
 
         CliCommand::Download {
             songs,
@@ -259,7 +395,7 @@ fn run() -> Result<()> {
             let total = songs.len();
             let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
             for (i, arg) in songs.iter().enumerate() {
-                let mid = parse_mid(arg);
+                let mid = util::parse_mid(arg);
                 println!("\n[{}/{}] 获取详情: {}", i + 1, total, mid);
                 let result = client.detail(&mid).and_then(|song| {
                     download_song(
@@ -310,9 +446,14 @@ fn run() -> Result<()> {
                     song.name,
                     ui::id(&song.mid)
                 );
-                if let Err(e) = download_song(
-                    &client, song, quality, &out, dry_run, preview, no_preview, play, &opts,
-                ) {
+                // search_for_qq_cp 不返回 strMediaMid；下载前补一次详情，
+                // 拿到真正的 media_mid 与各音质大小（旧搜索接口才带这两个字段）。
+                let result = client.detail(&song.mid).and_then(|detail| {
+                    download_song(
+                        &client, &detail, quality, &out, dry_run, preview, no_preview, play, &opts,
+                    )
+                });
+                if let Err(e) = result {
                     if total > 1 {
                         eprintln!("  {}", ui::failed(&format!("{}（{e:#}）", song.name)));
                     }
@@ -329,10 +470,12 @@ fn run() -> Result<()> {
         } => {
             let client = QqClient::new(auth, cli.proxy.as_deref(), cli.insecure)?;
             if !client.auth().logged_in {
-                bail!("签发直链需要会员账号 Cookie（--cookie / QQMUSIC_COOKIE / 默认 Cookie 文件）");
+                bail!(
+                    "签发直链需要会员账号 Cookie（--cookie / QQMUSIC_COOKIE / 默认 Cookie 文件）"
+                );
             }
             for arg in &songs {
-                let mid = parse_mid(arg);
+                let mid = util::parse_mid(arg);
                 let song = client.detail(&mid)?;
                 let (url, used) = bridge::mint(&client, &mid, quality)?;
                 if json {
@@ -372,6 +515,28 @@ fn run() -> Result<()> {
                 insecure: cli.insecure,
             };
             let auth = login::login(kind, &opts)?;
+            if let Some(path) = &cli.cookie_file {
+                if path != &auth::default_cookie_path() {
+                    auth::write_cookie_file(path, &auth.cookie)?;
+                    println!("  {} {}", ui::label("Cookie 已同步"), path.display());
+                }
+            }
+            let explicit_cookie = cli
+                .cookie
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            let env_cookie = std::env::var_os("QQMUSIC_COOKIE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if explicit_cookie || env_cookie {
+                println!(
+                    "  {}",
+                    ui::warn(
+                        "注意: --cookie / QQMUSIC_COOKIE 的优先级高于新写入的 Cookie 文件，后续命令请去掉或更新它们。"
+                    )
+                );
+            }
             print_auth(&auth);
             Ok(())
         }
@@ -420,307 +585,136 @@ fn download_song(
         ui::dim(quality.label())
     );
 
-    // 1) 仅试听模式
-    if preview_only {
-        let stream = match client.trial_url(song)? {
-            StreamLookup::Found(s) => s,
-            StreamLookup::Unavailable { result } => {
-                bail!("没有可用的官方试听片段（result={}）", result)
-            }
-        };
-        return finish_one(
-            client, song, &stream, out, dry_run, play, "QQ音乐 · 官方试听", 0, opts.verify,
-        );
-    }
-
-    // 2) 票据桥：会员账号签发的直链，本地匿名消费
-    if let Some(base) = &opts.bridge {
-        for q in quality.fallbacks() {
-            match bridge::fetch_via_bridge(client.client(), base, &song.mid, q) {
-                Ok(stream) => {
-                    println!(
-                        "  {} {}{}",
-                        ui::label("票据桥签发"),
-                        ui::ok(stream.quality.label()),
-                        if stream.quality != quality {
-                            ui::warn("（降级）")
-                        } else {
-                            String::new()
-                        }
-                    );
-                    return finish_one(
-                        client,
-                        song,
-                        &stream,
-                        out,
-                        dry_run,
-                        play,
-                        &format!("会员票据桥 · {}", stream.quality.label()),
-                        song.size_for(stream.quality),
-                        opts.verify,
-                    );
-                }
-                Err(e) => println!("  {} {} 不可用: {e}", ui::warn("票据桥"), q.label()),
-            }
-        }
-    }
-
-    // 3) QQ 原生直链
-    let mut last_result = 0i64;
-    for q in quality.fallbacks() {
-        match client.stream_url(song, q)? {
-            StreamLookup::Found(stream) => {
-                if q != quality {
-                    println!(
-                        "  {} 请求的 {} 不可用，已降级为 {}",
-                        ui::warn("!"),
-                        quality.label(),
-                        ui::ok(q.label())
-                    );
-                }
-                let source = if client.auth().logged_in {
-                    "QQ音乐 · 账号直链"
-                } else {
-                    "QQ音乐 · 匿名直链"
-                };
-                return finish_one(
-                    client,
-                    song,
-                    &stream,
-                    out,
-                    dry_run,
-                    play,
-                    source,
-                    song.size_for(q),
-                    opts.verify,
-                );
-            }
-            StreamLookup::Unavailable { result } => {
-                last_result = result;
-                if q == quality {
-                    println!(
-                        "  {} {} 被接口拒绝（result={}）",
-                        ui::warn("!"),
-                        q.label(),
-                        result
-                    );
-                }
-            }
-        }
-    }
-
-    // 4) 匿名镜像：QQ 不给，就换一家没有付费墙的曲库
-    if opts.mirror != "off" {
-        println!("  {}", ui::dim("QQ 拒绝，切换匿名镜像…"));
-        match mirror::resolve(client.client(), song, &opts.mirror) {
-            Ok(r) => {
-                if r.quality != quality {
-                    println!(
-                        "  {} 匿名免费源上限 {}（{} 需要账号/票据桥）",
-                        ui::warn("!"),
-                        ui::ok(r.quality.label()),
-                        quality.label()
-                    );
-                }
-                let stream = StreamUrl {
-                    url: r.url,
-                    quality: r.quality,
-                    preview: false,
-                };
-                let expected = r.expected_size.unwrap_or(0);
-                return finish_one(
-                    client, song, &stream, out, dry_run, play, &r.source, expected, opts.verify,
-                );
-            }
-            Err(e) => println!("  {e}"),
-        }
-    }
-
-    // 5) 官方 60 秒试听
-    if !no_preview {
-        match client.trial_url(song)? {
-            StreamLookup::Found(stream) => {
-                println!(
-                    "  {}",
-                    ui::warn("所有整曲通道都失败，回落到官方 60 秒试听")
-                );
-                return finish_one(
-                    client,
-                    song,
-                    &stream,
-                    out,
-                    dry_run,
-                    play,
-                    "QQ音乐 · 官方试听",
-                    0,
-                    opts.verify,
-                );
-            }
-            StreamLookup::Unavailable { .. } => {}
-        }
-    }
-
-    let hint = if client.auth().logged_in {
-        "当前账号没有该歌曲的播放/下载权限，或歌曲已下架。\n  可尝试：换有会员权益的账号、--bridge，或 --mirror migu。"
-    } else {
-        "匿名无法获取整曲。\n  可尝试：login qqmusic（QQ音乐 App 扫码）、--bridge，或 --mirror migu。"
+    let request = flow::Request {
+        quality,
+        out: out.to_path_buf(),
+        dry_run,
+        preview_only,
+        no_preview,
+        mirror: opts.mirror.clone(),
+        bridge: opts.bridge.clone(),
+        verify: opts.verify,
+        cancel: None,
     };
-    bail!("未获取到下载地址（result={}）。\n  {}", last_result, hint)
-}
+    let mut reporter = CliReporter::new();
+    let result = flow::execute(client, song, &request, &mut |event| reporter.event(event));
+    reporter.finish();
+    let outcome = result?;
 
-#[allow(clippy::too_many_arguments)]
-fn finish_one(
-    client: &QqClient,
-    song: &Song,
-    stream: &StreamUrl,
-    out: &Path,
-    dry_run: bool,
-    play: bool,
-    source: &str,
-    expected: u64,
-    verify: bool,
-) -> Result<()> {
-    let path = target_path(out, song, stream);
-
-    println!(
-        "  {} {}{}",
-        ui::label("音质"),
-        ui::ok(stream.quality.label()),
-        if stream.preview {
-            ui::warn("（官方 60 秒试听）")
-        } else {
-            String::new()
+    match &outcome {
+        flow::Outcome::DryRun { url, .. } => {
+            println!("  {} {}", ui::label("地址"), url);
         }
-    );
-    println!("  {} {}", ui::label("来源"), ui::id(source));
-    println!("  {} {}", ui::label("保存到"), path.display());
-
-    if dry_run {
-        println!("  {} {}", ui::label("地址"), stream.url);
-        return Ok(());
-    }
-
-    let bytes = download::download(client.client(), &stream.url, &path, stream.quality, expected)
-        .with_context(|| {
-            if stream.preview {
-                "试听片段下载失败（该曲目可能没有公开试听）".to_string()
-            } else {
-                "整曲下载失败".to_string()
-            }
-        })?;
-    println!(
-        "  {} {}（{:.2} MB）",
-        ui::done("完成"),
-        path.display(),
-        bytes as f64 / 1024.0 / 1024.0
-    );
-
-    if verify && !stream.preview && song.duration > 0 {
-        match probe::duration_of(&path) {
-            Ok(d) => {
-                let diff = (d - song.duration as f64).abs();
-                if diff > 2.5 {
-                    let _ = std::fs::remove_file(&path);
-                    bail!(
-                        "时长校验失败：文件 {:.1}s，歌曲 {}s —— 拿到的是片段或别的版本，已删除",
-                        d,
-                        song.duration
-                    );
-                }
-                println!("  {} {:.1}s / 期望 {}s", ui::done("校验"), d, song.duration);
-            }
-            Err(e) => println!("  {} {e}", ui::warn("校验跳过:")),
+        flow::Outcome::Downloaded { path, .. } if play => {
+            util::play_file(path);
         }
-    }
-
-    if play {
-        play_file(&path);
+        flow::Outcome::Downloaded { .. } => {}
     }
     Ok(())
 }
 
-fn target_path(out: &Path, song: &Song, stream: &StreamUrl) -> PathBuf {
-    let artist = sanitize(&song.artist_str());
-    let title = sanitize(&song.name);
-    let mut base = if artist.is_empty() {
-        title
-    } else {
-        format!("{} - {}", artist, title)
-    };
-    if stream.preview {
-        base.push_str(" [试听60s]");
-    }
-    if base.trim().is_empty() {
-        base = song.mid.clone();
-    }
-    // 按 UTF-8 字节截断：中文歌名按“字符数”截到 180 会超过文件名 255 字节上限。
-    let base = truncate_bytes(&base, 180);
-    out.join(format!("{}.{}", base, stream.quality.ext()))
+/// 把公共流程事件渲染成 CLI 原有风格；下载进度仍用 indicatif。
+struct CliReporter {
+    bar: Option<ProgressBar>,
+    skipped: bool,
 }
 
-fn play_file(path: &Path) {
-    let attempts: Vec<(&str, Vec<&str>)> = vec![
-        ("ffplay", vec!["-nodisp", "-autoexit", "-loglevel", "quiet"]),
-        ("mpv", vec!["--no-video", "--really-quiet"]),
-    ];
-    for (cmd, args) in attempts {
-        let status = Command::new(cmd).args(&args).arg(path).status();
-        match status {
-            Ok(s) if s.success() => return,
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                eprintln!("  播放失败: {}", e);
-                return;
+impl CliReporter {
+    fn new() -> Self {
+        Self {
+            bar: None,
+            skipped: false,
+        }
+    }
+
+    fn event(&mut self, event: FlowEvent) {
+        match event {
+            FlowEvent::Message { level, text } => {
+                if text.starts_with("已存在，跳过") {
+                    self.skipped = true;
+                }
+                match level {
+                    flow::Level::Info => println!("  {text}"),
+                    flow::Level::Dim => println!("  {}", ui::dim(&text)),
+                    flow::Level::Warn => println!("  {} {text}", ui::warn("!")),
+                }
+            }
+            FlowEvent::Resolved {
+                quality,
+                source,
+                preview,
+                ..
+            } => {
+                println!(
+                    "  {} {}{}",
+                    ui::label("音质"),
+                    ui::ok(quality.label()),
+                    if preview {
+                        ui::warn("（官方 60 秒试听）")
+                    } else {
+                        String::new()
+                    }
+                );
+                println!("  {} {}", ui::label("来源"), ui::id(&source));
+            }
+            FlowEvent::Target { path, .. } => {
+                println!("  {} {}", ui::label("保存到"), path.display());
+            }
+            FlowEvent::Progress { downloaded, total } => self.progress(downloaded, total),
+            FlowEvent::Saved { path, bytes, .. } => {
+                self.finish();
+                println!(
+                    "  {} {}（{:.2} MB）",
+                    if self.skipped {
+                        ui::warn("已存在")
+                    } else {
+                        ui::done("完成")
+                    },
+                    path.display(),
+                    bytes as f64 / 1024.0 / 1024.0
+                );
+            }
+            FlowEvent::Verified { actual, expected } => {
+                println!("  {} {:.1}s / 期望 {}s", ui::done("校验"), actual, expected);
             }
         }
     }
-    eprintln!("  未找到 ffplay/mpv，无法自动播放");
-}
 
-fn parse_mid(arg: &str) -> String {
-    let arg = arg.trim();
-    if let Some(i) = arg.find("/songDetail/") {
-        let rest = &arg[i + "/songDetail/".len()..];
-        return rest
-            .split(['?', '#', '/'])
-            .next()
-            .unwrap_or(rest)
-            .to_string();
+    fn progress(&mut self, downloaded: u64, total: u64) {
+        if self.bar.is_none() {
+            let bar = if total > 0 {
+                let bar = ProgressBar::new(total);
+                bar.set_style(
+                    ProgressStyle::with_template(
+                        "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
+                         {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})",
+                    )
+                    .unwrap()
+                    .progress_chars("#>-"),
+                );
+                bar
+            } else {
+                let bar = ProgressBar::new_spinner();
+                bar.set_style(
+                    ProgressStyle::with_template(
+                        "{spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec})",
+                    )
+                    .unwrap(),
+                );
+                bar
+            };
+            self.bar = Some(bar);
+        }
+        if let Some(bar) = &self.bar {
+            bar.set_position(downloaded);
+        }
     }
-    if let Some(i) = arg.find("songmid=") {
-        let rest = &arg[i + "songmid=".len()..];
-        return rest
-            .split(['&', '#', '?'])
-            .next()
-            .unwrap_or(rest)
-            .to_string();
-    }
-    arg.to_string()
-}
 
-fn sanitize(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        let c = match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        };
-        out.push(c);
+    fn finish(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
     }
-    out.trim().trim_matches('.').to_string()
-}
-
-fn truncate_bytes(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].trim_end().to_string()
 }
 
 /// 下载前的一行登录态，不打印完整说明。
@@ -731,7 +725,7 @@ fn print_auth_brief(auth: &Auth) {
             ui::label("登录态"),
             ui::ok(&format!(
                 "已登录（uin={}, 来源: {}）",
-                mask(&auth.uin),
+                util::mask(&auth.uin),
                 auth.source
             ))
         );
@@ -750,7 +744,7 @@ fn print_auth(auth: &Auth) {
             "  {} {}（uin={}, g_tk={}, 来源: {}）",
             ui::label("登录态"),
             ui::ok("已登录"),
-            ui::id(&mask(&auth.uin)),
+            ui::id(&util::mask(&auth.uin)),
             auth.g_tk,
             auth.source
         );
@@ -775,18 +769,6 @@ fn print_auth(auth: &Auth) {
             ui::bold("qqmusic-dl serve -p 8080")
         );
     }
-}
-
-fn mask(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= 6 {
-        return "*".repeat(chars.len());
-    }
-    format!(
-        "{}***{}",
-        chars[..3].iter().collect::<String>(),
-        chars[chars.len() - 2..].iter().collect::<String>()
-    )
 }
 
 fn print_table(songs: &[Song]) {
@@ -824,7 +806,7 @@ fn print_table(songs: &[Song]) {
         if album_w > 0 {
             line.push_str(&format!(" {} ", pad(&s.album, album_w)));
         }
-        let qtext = quality_flags(s);
+        let qtext = s.quality_flags();
         let qdisp = if qtext == "-" {
             ui::dim("-")
         } else {
@@ -842,10 +824,19 @@ fn print_table(songs: &[Song]) {
     );
 }
 
-fn print_json(songs: &[Song]) -> Result<()> {
+fn print_json(songs: &[Song], client: Option<&QqClient>) -> Result<()> {
     let arr: Vec<_> = songs
         .iter()
         .map(|s| {
+            // 新搜索接口不带 strMediaMid，搜索结果里的 media_mid 只是
+            // songmid 的兜底值；--json 面向脚本，补一次详情拿准确值。
+            let owned = match client {
+                Some(client) if s.media_mid == s.mid => {
+                    client.detail(&s.mid).unwrap_or_else(|_| s.clone())
+                }
+                _ => s.clone(),
+            };
+            let s = &owned;
             serde_json::json!({
                 "songmid": s.mid,
                 "media_mid": s.media_mid,
@@ -862,24 +853,6 @@ fn print_json(songs: &[Song]) -> Result<()> {
         .collect();
     println!("{}", serde_json::to_string_pretty(&arr)?);
     Ok(())
-}
-
-fn quality_flags(s: &Song) -> String {
-    let mut v = Vec::new();
-    if s.size_320 > 0 {
-        v.push("320k");
-    }
-    if s.size_128 > 0 {
-        v.push("128k");
-    }
-    if s.size_flac > 0 {
-        v.push("FLAC");
-    }
-    if v.is_empty() {
-        "-".to_string()
-    } else {
-        v.join("/")
-    }
 }
 
 fn pad(s: &str, width: usize) -> String {

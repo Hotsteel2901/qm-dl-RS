@@ -8,22 +8,14 @@ use crate::auth::Auth;
 
 /// 启动一个"票据桥"：用会员账号把 songmid 换成 vkey 直链。
 /// 直链本身是 bearer token（不校验 Cookie / IP），任何没有账号的机器都能直接下载。
-pub fn serve(
-    port: u16,
-    bind: &str,
-    auth: Auth,
-    proxy: Option<&str>,
-    insecure: bool,
-) -> Result<()> {
+pub fn serve(port: u16, bind: &str, auth: Auth, proxy: Option<&str>, insecure: bool) -> Result<()> {
     if !auth.logged_in {
         bail!("票据桥需要登录 Cookie（扫码/粘贴你本人的 Cookie 后再启动）");
     }
     let client = QqClient::new(auth, proxy, insecure)?;
-    let listener = TcpListener::bind((bind, port))
-        .with_context(|| format!("监听 {bind}:{port} 失败"))?;
-    let local = listener
-        .local_addr()
-        .context("读取票据桥监听地址失败")?;
+    let listener =
+        TcpListener::bind((bind, port)).with_context(|| format!("监听 {bind}:{port} 失败"))?;
+    let local = listener.local_addr().context("读取票据桥监听地址失败")?;
     if local.ip().is_unspecified() {
         println!(
             "票据桥已启动: http://<本机IP>:{}/url?mid=<songmid>&q=320",
@@ -35,9 +27,7 @@ pub fn serve(
              仅本机访问可加 --bind 127.0.0.1。"
         );
     } else {
-        println!(
-            "票据桥已启动: http://{local}/url?mid=<songmid>&q=320"
-        );
+        println!("票据桥已启动: http://{local}/url?mid=<songmid>&q=320");
     }
     println!("直链有效期约 2 小时；无账号的机器可用 --bridge 消费。");
     for conn in listener.incoming() {
@@ -74,7 +64,7 @@ fn handle(client: &QqClient, mut stream: TcpStream) -> Result<()> {
         Some((r, q)) => (r, q),
         None => (path, ""),
     };
-    let params = parse_query(query);
+    let params = crate::util::parse_query(query);
 
     let body = if method != "GET" {
         respond(&mut stream, 405, json!({"ok": false, "error": "only GET"}))?;
@@ -83,14 +73,21 @@ fn handle(client: &QqClient, mut stream: TcpStream) -> Result<()> {
         json!({"ok": true, "logged_in": client.auth().logged_in})
     } else if route == "/url" {
         let mid = params.get("mid").cloned().unwrap_or_default();
-        let q = params.get("q").cloned().unwrap_or_else(|| "320".to_string());
+        let q = params
+            .get("q")
+            .cloned()
+            .unwrap_or_else(|| "320".to_string());
         if mid.is_empty() {
             json!({"ok": false, "error": "缺少 mid"})
         } else {
-            let quality = match parse_quality(&q) {
+            let quality = match Quality::from_str_loose(&q) {
                 Some(q) => q,
                 None => {
-                    respond(&mut stream, 400, json!({"ok": false, "error": format!("未知音质 {q}")}))?;
+                    respond(
+                        &mut stream,
+                        400,
+                        json!({"ok": false, "error": format!("未知音质 {q}")}),
+                    )?;
                     return Ok(());
                 }
             };
@@ -106,7 +103,11 @@ fn handle(client: &QqClient, mut stream: TcpStream) -> Result<()> {
             }
         }
     } else {
-        respond(&mut stream, 404, json!({"ok": false, "error": "use /url?mid=..&q=320"}))?;
+        respond(
+            &mut stream,
+            404,
+            json!({"ok": false, "error": "use /url?mid=..&q=320"}),
+        )?;
         return Ok(());
     };
 
@@ -154,7 +155,10 @@ pub fn fetch_via_bridge(
         .context("读取票据桥响应失败")?;
     let v: serde_json::Value = serde_json::from_str(&text).context("票据桥返回非 JSON")?;
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
-        let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("未知错误");
+        let err = v
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("未知错误");
         bail!("票据桥拒绝: {err}");
     }
     let purl = v.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -175,60 +179,5 @@ pub fn fetch_via_bridge(
 }
 
 fn quality_name(q: Quality) -> &'static str {
-    match q {
-        Quality::Mp3_128 => "128",
-        Quality::Mp3_320 => "320",
-        Quality::Flac => "flac",
-    }
-}
-
-fn parse_quality(s: &str) -> Option<Quality> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "128" | "m500" | "mp3-128" | "low" => Some(Quality::Mp3_128),
-        "320" | "m800" | "mp3" | "high" => Some(Quality::Mp3_320),
-        "flac" | "lossless" | "sq" | "f000" => Some(Quality::Flac),
-        _ => None,
-    }
-}
-
-fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    for kv in q.split('&') {
-        if let Some((k, v)) = kv.split_once('=') {
-            out.insert(percent_decode(k), percent_decode(v));
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).to_string()
+    q.slug()
 }

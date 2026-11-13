@@ -7,15 +7,11 @@
 //!   3. 手机确认后，用事件里的 qqmusic_uin + qqmusic_key 调 LoginServer/Login
 //!      （tmeLoginType=6）换 musickey / musicid，再走统一的 Cookie 落盘。
 
-use super::{
-    build_auth, musicu_post_json, now_ms, show_qr, CurlJar, HttpOut, LoginOpts,
-};
+use super::{build_auth, musicu_post_json, now_ms, show_qr, CurlJar, HttpOut, LoginOpts};
 use crate::auth::Auth;
 use anyhow::{bail, Context, Result};
 use base64::Engine;
-use rumqttc::v5::mqttbytes::v5::{
-    Packet, Publish, SubscribeProperties, SubscribeReasonCode,
-};
+use rumqttc::v5::mqttbytes::v5::{Packet, Publish, SubscribeProperties, SubscribeReasonCode};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::{Client, Event, MqttOptions};
 use rumqttc::{Proxy, ProxyAuth, ProxyType, TlsConfiguration, Transport};
@@ -129,7 +125,11 @@ fn mobile_request_body(method: &str, param: Value, tme_login_type: Option<&str>)
 
 /// 手机客户端接口的响应按 `module.method` 回包；兼容 `req` / `req_0`
 /// 以及老版本可能的其它外层 key。
-fn parse_module_response(resp: &HttpOut, module: &str, method: &str) -> Result<(Option<String>, Value)> {
+fn parse_module_response(
+    resp: &HttpOut,
+    module: &str,
+    method: &str,
+) -> Result<(Option<String>, Value)> {
     let value: Value = serde_json::from_slice(&resp.body).with_context(|| {
         format!(
             "登录响应不是 JSON（HTTP {}）：{}",
@@ -184,12 +184,11 @@ fn redact_token(body: &str) -> String {
     match body.find("\"token\":\"") {
         Some(idx) => {
             let start = idx + "\"token\":\"".len();
-            let end = body[start..].find('"').map(|i| start + i).unwrap_or(body.len());
-            format!(
-                "{}<redacted>{}",
-                &body[..start],
-                &body[end..]
-            )
+            let end = body[start..]
+                .find('"')
+                .map(|i| start + i)
+                .unwrap_or(body.len());
+            format!("{}<redacted>{}", &body[..start], &body[end..])
         }
         None => body.to_string(),
     }
@@ -270,7 +269,10 @@ fn wait_for_scan<T>(
                 if std::env::var_os("QQMUSIC_DEBUG").is_some() {
                     eprintln!("[mqtt] CONNACK: {:?}", ack.code);
                 }
-                if matches!(ack.code, rumqttc::v5::mqttbytes::v5::ConnectReturnCode::Success) {
+                if matches!(
+                    ack.code,
+                    rumqttc::v5::mqttbytes::v5::ConnectReturnCode::Success
+                ) {
                     connect_errors = 0;
                     // clean_start=true：服务端不保留会话，断线重连后必须重新订阅。
                     client
@@ -280,10 +282,7 @@ fn wait_for_scan<T>(
                             subscribe_props.clone(),
                         )
                         .context("MQTT 订阅二维码状态失败")?;
-                    println!(
-                        "  {}",
-                        crate::ui::ok("已连接二维码状态服务，等待扫码…")
-                    );
+                    println!("  {}", crate::ui::ok("已连接二维码状态服务，等待扫码…"));
                 }
             }
             Ok(Ok(Event::Incoming(Packet::SubAck(ack)))) => {
@@ -301,10 +300,7 @@ fn wait_for_scan<T>(
             Ok(Ok(Event::Incoming(Packet::Publish(p)))) => {
                 match parse_scan_message(&user_properties(&p), &p.payload)? {
                     ScanEvent::Scanned => {
-                        println!(
-                            "  {}",
-                            crate::ui::warn("已扫码，请在手机上确认登录…")
-                        );
+                        println!("  {}", crate::ui::warn("已扫码，请在手机上确认登录…"));
                     }
                     // 在 MQTT 会话仍然存活时完成换票。
                     ScanEvent::Credentials(c) => return exchange(c),
@@ -322,9 +318,7 @@ fn wait_for_scan<T>(
                 if connect_errors == 3 {
                     println!(
                         "  {}",
-                        crate::ui::warn(
-                            "连接二维码状态服务失败，正在自动重试（不影响继续扫码）…"
-                        )
+                        crate::ui::warn("连接二维码状态服务失败，正在自动重试（不影响继续扫码）…")
                     );
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -339,11 +333,7 @@ fn wait_for_scan<T>(
 
 fn build_mqtt_options(qrcode_id: &str, opts: &LoginOpts) -> Result<MqttOptions> {
     let client_id = format!("{}{:04}", now_ms(), now_ms() % 10_000);
-    let mut mqtt = MqttOptions::new(
-        client_id,
-        format!("wss://{MQTT_HOST}:443{MQTT_PATH}"),
-        443,
-    );
+    let mut mqtt = MqttOptions::new(client_id, format!("wss://{MQTT_HOST}:443{MQTT_PATH}"), 443);
     mqtt.set_keep_alive(Duration::from_secs(45));
     mqtt.set_clean_start(true);
     mqtt.set_transport(Transport::wss_with_config(TlsConfiguration::Rustls(
@@ -595,12 +585,10 @@ mod tests {
         .unwrap();
         assert_eq!(scanned, ScanEvent::Scanned);
 
-        let payload = br#"{"cookies":{"qqmusic_uin":{"value":"12345"},"qqmusic_key":{"value":"W_Xkey"}}}"#;
-        let event = parse_scan_message(
-            &[("type".to_string(), "cookies".to_string())],
-            payload,
-        )
-        .unwrap();
+        let payload =
+            br#"{"cookies":{"qqmusic_uin":{"value":"12345"},"qqmusic_key":{"value":"W_Xkey"}}}"#;
+        let event =
+            parse_scan_message(&[("type".to_string(), "cookies".to_string())], payload).unwrap();
         assert_eq!(
             event,
             ScanEvent::Credentials(ScanCreds {
@@ -609,11 +597,7 @@ mod tests {
             })
         );
 
-        assert!(parse_scan_message(
-            &[("type".to_string(), "canceled".to_string())],
-            b""
-        )
-        .is_err());
+        assert!(parse_scan_message(&[("type".to_string(), "canceled".to_string())], b"").is_err());
         assert_eq!(
             parse_scan_message(&[("type".to_string(), "something".to_string())], b"{}").unwrap(),
             ScanEvent::Ignore
